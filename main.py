@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextvars
 import copy
 import hashlib
 import hmac
@@ -132,6 +133,10 @@ async def add_security_headers(request: Request, call_next):
     )
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "geolocation=(), camera=(), microphone=(), payment=()"
+    if request.url.path in ("/", "/finish-login") or request.url.path == "/api/auth" or request.url.path.startswith("/api/auth/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
     return response
 
 
@@ -1780,8 +1785,24 @@ def validate_sap_schema(payload_dict: dict) -> Tuple[bool, Optional[str], Option
 # ---------------------------------------------------------
 # 7. AUTHENTICATION & SECURITY SCREENING
 # ---------------------------------------------------------
+def _get_env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = int(raw)
+        return parsed if parsed > 0 else default
+    except ValueError:
+        return default
+
+
 SESSION_SECRET = os.getenv("SESSION_SECRET") or "aepl-invoice-secure-session-secret-2026-key"
+SESSION_MAX_AGE_SECONDS = _get_env_int("SESSION_MAX_AGE_SECONDS", 28800)  # 8 hours absolute max lifetime from auth_time
+SESSION_IDLE_TIMEOUT_SECONDS = _get_env_int("SESSION_IDLE_TIMEOUT_SECONDS", 7200)  # 2 hours idle timeout
 _REVOKED_TOKENS: Set[str] = set()
+_LAST_VERIFIED_AUTH_TIME: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar(
+    "_last_verified_auth_time", default=None
+)
 
 
 def _extract_bearer_token(authorization: Optional[str], x_firebase_token: Optional[str]) -> Optional[str]:
@@ -1806,20 +1827,8 @@ def _is_token_revoked(token: str, jti: Optional[str] = None) -> bool:
     return False
 
 
-def create_corporate_session_token(email: str) -> str:
-    payload = {
-        "email": email.lower().strip(),
-        "jti": secrets.token_hex(16),
-        "exp": int(time.time()) + 28800,  # 8 hours session expiration (CHECK 01)
-        "is_admin": is_admin_user(email),
-    }
-    payload_json = json.dumps(payload, separators=(',', ':'))
-    payload_b64 = base64.urlsafe_b64encode(payload_json.encode()).decode()
-    signature = hmac.new(SESSION_SECRET.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
-    return f"{payload_b64}.{signature}"
-
-
-def verify_corporate_session_token(token: str) -> Optional[str]:
+def _decode_and_verify_corporate_payload(token: str) -> Optional[Dict[str, Any]]:
+    """Verifies HMAC signature and revocation status of a corporate session token and returns its payload."""
     try:
         parts = token.split(".")
         if len(parts) != 2:
@@ -1830,14 +1839,56 @@ def verify_corporate_session_token(token: str) -> Optional[str]:
             return None
         payload_json = base64.urlsafe_b64decode(payload_b64.encode()).decode()
         payload = json.loads(payload_json)
-        if payload.get("exp", 0) < time.time():
+        if not isinstance(payload, dict):
             return None
         jti = payload.get("jti")
         if _is_token_revoked(token, jti):
             return None
-        return payload.get("email")
+        return payload
     except Exception:
         return None
+
+
+def create_corporate_session_token(email: str, auth_time: Optional[int] = None) -> str:
+    now = int(time.time())
+    if auth_time is not None and auth_time != "":
+        resolved_auth_time = int(float(auth_time))
+    else:
+        resolved_auth_time = now
+    exp = min(now + SESSION_MAX_AGE_SECONDS, resolved_auth_time + SESSION_MAX_AGE_SECONDS)
+    payload = {
+        "email": email.lower().strip(),
+        "jti": secrets.token_hex(16),
+        "iat": now,
+        "auth_time": resolved_auth_time,
+        "exp": exp,  # 8 hours session expiration capped at original auth_time + SESSION_MAX_AGE_SECONDS (CHECK 01)
+        "is_admin": is_admin_user(email),
+    }
+    payload_json = json.dumps(payload, separators=(',', ':'))
+    payload_b64 = base64.urlsafe_b64encode(payload_json.encode()).decode()
+    signature = hmac.new(SESSION_SECRET.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
+    return f"{payload_b64}.{signature}"
+
+
+def verify_corporate_session_token(token: str) -> Optional[str]:
+    payload = _decode_and_verify_corporate_payload(token)
+    if payload is None:
+        return None
+    now = time.time()
+    exp = payload.get("exp")
+    if not isinstance(exp, (int, float)) or exp < now:
+        return None
+    auth_time = payload.get("auth_time")
+    if auth_time is not None:
+        try:
+            auth_ts = float(auth_time)
+        except (TypeError, ValueError):
+            return None
+        if not (now - auth_ts <= SESSION_MAX_AGE_SECONDS):
+            return None
+        _LAST_VERIFIED_AUTH_TIME.set(int(auth_ts))
+    email = payload.get("email")
+    return email if isinstance(email, str) and email else None
 
 
 def revoke_session_token(token: str):
@@ -1864,6 +1915,7 @@ def revoke_session_token(token: str):
 
 
 def verify_corporate_user(authorization: Optional[str], x_firebase_token: Optional[str]) -> str:
+    _LAST_VERIFIED_AUTH_TIME.set(None)
     token = _extract_bearer_token(authorization, x_firebase_token)
 
     if not token:
@@ -1875,10 +1927,35 @@ def verify_corporate_user(authorization: Optional[str], x_firebase_token: Option
         email = verify_corporate_session_token(token)
     else:
         # 2. Firebase ID Token (3-segment JWT), with fallback to Corporate Session Token
+        decoded = None
         try:
             decoded = firebase_auth.verify_id_token(token)
-            email = (decoded.get("email") or "").lower().strip()
         except Exception:
+            decoded = None
+
+        if decoded is not None:
+            if _is_token_revoked(token):
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid or expired authentication session. Please sign in again.",
+                )
+            fb_auth_time = decoded.get("auth_time")
+            if fb_auth_time is not None:
+                try:
+                    auth_ts = float(fb_auth_time)
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=401,
+                        detail="Authentication session expired. Please sign in again.",
+                    )
+                if not (time.time() - auth_ts <= SESSION_MAX_AGE_SECONDS):
+                    raise HTTPException(
+                        status_code=401,
+                        detail="Authentication session expired. Please sign in again.",
+                    )
+                _LAST_VERIFIED_AUTH_TIME.set(int(auth_ts))
+            email = (decoded.get("email") or "").lower().strip()
+        else:
             email = verify_corporate_session_token(token)
 
     if not email:
@@ -3234,7 +3311,14 @@ async def process_single_invoice_document(
 async def serve_portal():
     if not os.path.exists("index.html"):
         raise HTTPException(status_code=404, detail="index.html portal file not found")
-    return FileResponse("index.html")
+    return FileResponse(
+        "index.html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.get("/healthz")
@@ -3480,8 +3564,13 @@ async def session_from_firebase(
     x_firebase_token: Optional[str] = Header(default=None),
 ):
     """Exchanges a verified Firebase ID Token for a Corporate Session Token."""
-    email = verify_corporate_user(authorization, x_firebase_token)
-    session_token = create_corporate_session_token(email)
+    ctx_token = _LAST_VERIFIED_AUTH_TIME.set(None)
+    try:
+        email = verify_corporate_user(authorization, x_firebase_token)
+        auth_time = _LAST_VERIFIED_AUTH_TIME.get()
+    finally:
+        _LAST_VERIFIED_AUTH_TIME.reset(ctx_token)
+    session_token = create_corporate_session_token(email, auth_time=auth_time)
     return JSONResponse({
         "status": "SUCCESS",
         "email": email,
@@ -3495,9 +3584,51 @@ async def refresh_corporate_session(
     authorization: Optional[str] = Header(default=None),
     x_firebase_token: Optional[str] = Header(default=None),
 ):
-    """Issues a fresh 8-hour Corporate Session Token only when the caller presents an active, unexpired, non-revoked session."""
-    email = verify_corporate_user(authorization, x_firebase_token)
-    session_token = create_corporate_session_token(email)
+    """Issues a fresh Corporate Session Token preserving original auth_time only when the caller presents an active, unexpired, non-revoked session within the 8-hour maximum lifetime."""
+    token = _extract_bearer_token(authorization, x_firebase_token)
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing authentication session token.")
+
+    legacy_auth_time: Optional[int] = None
+    if token.count(".") == 1:
+        corp_payload = _decode_and_verify_corporate_payload(token)
+        if corp_payload is not None:
+            raw_auth_time = corp_payload.get("auth_time")
+            if raw_auth_time is not None:
+                try:
+                    auth_ts = float(raw_auth_time)
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=401,
+                        detail="Invalid or expired authentication session. Please sign in again.",
+                    )
+                if not (time.time() - auth_ts < SESSION_MAX_AGE_SECONDS):
+                    raise HTTPException(
+                        status_code=401,
+                        detail="Session maximum lifetime reached. Please sign in again.",
+                    )
+            else:
+                raw_exp = corp_payload.get("exp")
+                if isinstance(raw_exp, (int, float)):
+                    legacy_auth_time = min(int(time.time()), int(raw_exp) - SESSION_MAX_AGE_SECONDS)
+
+    ctx_token = _LAST_VERIFIED_AUTH_TIME.set(None)
+    try:
+        email = verify_corporate_user(authorization, x_firebase_token)
+        auth_time = _LAST_VERIFIED_AUTH_TIME.get()
+    finally:
+        _LAST_VERIFIED_AUTH_TIME.reset(ctx_token)
+
+    if auth_time is None and legacy_auth_time is not None:
+        auth_time = legacy_auth_time
+
+    if auth_time is not None and not (time.time() - auth_time < SESSION_MAX_AGE_SECONDS):
+        raise HTTPException(
+            status_code=401,
+            detail="Session maximum lifetime reached. Please sign in again.",
+        )
+
+    session_token = create_corporate_session_token(email, auth_time=auth_time)
     user = audit_service.get_user(email) or {}
     return JSONResponse({
         "status": "SUCCESS",
