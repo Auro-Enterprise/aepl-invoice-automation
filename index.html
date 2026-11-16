@@ -1752,24 +1752,33 @@
     function showToast(msg) {
       const toast = document.getElementById("toastBox");
       const text = document.getElementById("toastMessage");
-      text.innerText = msg;
-      toast.classList.add("show");
-      setTimeout(() => toast.classList.remove("show"), 3500);
+      if (text) text.innerText = msg;
+      if (toast && toast.classList) {
+        toast.classList.add("show");
+        const t = setTimeout(() => toast.classList.remove("show"), 3500);
+        if (t && typeof t.unref === "function") t.unref();
+      }
     }
     window.showToast = showToast;
 
     // Tab Switcher
     window.switchTab = (tabName) => {
       currentTab = tabName;
-      document.getElementById("tabBtnUpload").className = "nav-tab-btn" + (tabName === "upload" ? " active" : "");
-      document.getElementById("tabBtnHITL").className = "nav-tab-btn" + (tabName === "hitl" ? " active" : "");
-      document.getElementById("tabBtnMIS").className = "nav-tab-btn" + (tabName === "mis" ? " active" : "");
+      const tabBtnUpload = document.getElementById("tabBtnUpload");
+      const tabBtnHITL = document.getElementById("tabBtnHITL");
+      const tabBtnMIS = document.getElementById("tabBtnMIS");
+      if (tabBtnUpload) tabBtnUpload.className = "nav-tab-btn" + (tabName === "upload" ? " active" : "");
+      if (tabBtnHITL) tabBtnHITL.className = "nav-tab-btn" + (tabName === "hitl" ? " active" : "");
+      if (tabBtnMIS) tabBtnMIS.className = "nav-tab-btn" + (tabName === "mis" ? " active" : "");
 
-      document.getElementById("viewUpload").style.display = tabName === "upload" ? "block" : "none";
-      document.getElementById("viewHITL").style.display = tabName === "hitl" ? "block" : "none";
-      document.getElementById("viewMIS").style.display = tabName === "mis" ? "block" : "none";
+      const viewUpload = document.getElementById("viewUpload");
+      const viewHITL = document.getElementById("viewHITL");
+      const viewMIS = document.getElementById("viewMIS");
+      if (viewUpload) viewUpload.style.display = tabName === "upload" ? "block" : "none";
+      if (viewHITL) viewHITL.style.display = tabName === "hitl" ? "block" : "none";
+      if (viewMIS) viewMIS.style.display = tabName === "mis" ? "block" : "none";
 
-      const mainEl = document.querySelector(".app-main");
+      const mainEl = typeof document.querySelector === "function" ? document.querySelector(".app-main") : null;
       if (mainEl) {
         if (tabName === "mis") {
           mainEl.style.maxWidth = "1440px";
@@ -1782,8 +1791,26 @@
       if (tabName === "mis") loadMISDashboard();
     };
 
+    const SESSION_MAX_AGE_MS = 8 * 60 * 60 * 1000;      // 8 hours absolute max lifetime from auth_time
+    const SESSION_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours (7200000 ms) client-side idle inactivity limit
+    const SESSION_CHECK_INTERVAL_MS = 60 * 1000;        // 60 seconds periodic timeout check
+    const ACTIVITY_WRITE_THROTTLE_MS = 15 * 1000;       // 15 seconds write throttle for activity tracking
+    const LEGACY_LOCAL_AUTH_KEYS = [
+      "corporate_token",
+      "user_email",
+      "user_name",
+      "is_admin",
+      "last_login_email",
+      "last_activity_at"
+    ];
+
     let _refreshInFlight = null;
+    let _verifyInFlight = null;
     let _lastExpiredToastAt = 0;
+    let _lastActivityWriteAt = 0;
+    let _hadAuthenticatedSession = false;
+    let _startupRestoreCompletedAt = 0;
+    let _startupRestoredToken = "";
 
     function escapeHtml(str) {
       return String(str || "")
@@ -1794,6 +1821,103 @@
         .replace(/'/g, "&#39;");
     }
 
+    function getSessionStore() {
+      try {
+        return window.sessionStorage || null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function isActiveEmailLinkCallbackUrl() {
+      try {
+        const params = new URLSearchParams((window.location && window.location.search) || "");
+        return params.get("mode") === "signIn" && !!params.get("oobCode");
+      } catch (_) {
+        return false;
+      }
+    }
+
+    function isPasswordResetFlowActive() {
+      try {
+        const params = new URLSearchParams((window.location && window.location.search) || "");
+        return params.get("action") === "reset-password" && !!params.get("token");
+      } catch (_) {
+        return false;
+      }
+    }
+
+    function purgeLegacyLocalStorage(forceEmailKey = false) {
+      try {
+        if (!window.localStorage) return;
+        for (const key of LEGACY_LOCAL_AUTH_KEYS) {
+          window.localStorage.removeItem(key);
+        }
+        if (forceEmailKey || !isActiveEmailLinkCallbackUrl()) {
+          window.localStorage.removeItem("emailForSignIn");
+        }
+      } catch (_) {}
+    }
+    window.purgeLegacyLocalStorage = purgeLegacyLocalStorage;
+
+    function purgeLegacyFirebaseIndexedDB(force = false) {
+      try {
+        if (!force && isActiveEmailLinkCallbackUrl()) return;
+        if (typeof window.indexedDB !== "undefined" && window.indexedDB && typeof window.indexedDB.deleteDatabase === "function") {
+          const req = window.indexedDB.deleteDatabase("firebaseLocalStorageDb");
+          if (req && typeof req === "object") {
+            req.onerror = () => {};
+            req.onblocked = () => {};
+          }
+        }
+      } catch (_) {}
+    }
+    window.purgeLegacyFirebaseIndexedDB = purgeLegacyFirebaseIndexedDB;
+
+    function clearSessionAuthStorage(keepLastLoginEmail = false) {
+      const store = getSessionStore();
+      if (!store) return;
+      try {
+        store.removeItem("corporate_token");
+        store.removeItem("user_email");
+        store.removeItem("user_name");
+        store.removeItem("is_admin");
+        store.removeItem("last_activity_at");
+        if (!keepLastLoginEmail) {
+          store.removeItem("last_login_email");
+        }
+      } catch (_) {}
+    }
+
+    function showLoginScreen() {
+      const userPill = document.getElementById("userPill");
+      const portalNav = document.getElementById("portalNav");
+      const loginCard = document.getElementById("loginCard");
+      const viewUpload = document.getElementById("viewUpload");
+      const viewHITL = document.getElementById("viewHITL");
+      const viewMIS = document.getElementById("viewMIS");
+      if (userPill) userPill.style.display = "none";
+      if (portalNav) portalNav.style.display = "none";
+      if (loginCard) loginCard.style.display = "block";
+      if (viewUpload) viewUpload.style.display = "none";
+      if (viewHITL) viewHITL.style.display = "none";
+      if (viewMIS) viewMIS.style.display = "none";
+    }
+
+    function isPortalUiVisible() {
+      const portalNav = document.getElementById("portalNav");
+      const viewUpload = document.getElementById("viewUpload");
+      const viewHITL = document.getElementById("viewHITL");
+      const viewMIS = document.getElementById("viewMIS");
+      return [portalNav, viewUpload, viewHITL, viewMIS].some(
+        el => !!(el && el.style && el.style.display && el.style.display !== "none")
+      );
+    }
+
+    // Purge any legacy persistent credentials immediately on script load
+    purgeLegacyLocalStorage(false);
+    purgeLegacyFirebaseIndexedDB(false);
+
     function parseCorporateTokenPayload(token) {
       if (!token || typeof token !== "string") return null;
       const parts = token.split(".");
@@ -1801,32 +1925,109 @@
       try {
         let b64 = parts[0].replace(/-/g, "+").replace(/_/g, "/");
         while (b64.length % 4 !== 0) b64 += "=";
-        return JSON.parse(atob(b64));
+        const jsonStr = typeof atob === "function"
+          ? atob(b64)
+          : Buffer.from(b64, "base64").toString("utf8");
+        return JSON.parse(jsonStr);
       } catch (_) {
         return null;
       }
     }
+    window.parseCorporateTokenPayload = parseCorporateTokenPayload;
 
     function isCorporateTokenValidLocally(token) {
       const payload = parseCorporateTokenPayload(token);
-      if (!payload || typeof payload.exp !== "number") return false;
-      return (payload.exp * 1000) > (Date.now() + 15000);
+      if (!payload || typeof payload.exp !== "number" || !Number.isFinite(payload.exp)) return false;
+      const nowMs = Date.now();
+      if ((payload.exp * 1000) <= (nowMs + 15000)) return false;
+      if (payload.auth_time !== undefined && payload.auth_time !== null) {
+        if (typeof payload.auth_time !== "number" || !Number.isFinite(payload.auth_time) || payload.auth_time <= 0) {
+          return false;
+        }
+        if ((nowMs - (payload.auth_time * 1000)) >= SESSION_MAX_AGE_MS) {
+          return false;
+        }
+      }
+      return true;
     }
     window.isCorporateTokenValidLocally = isCorporateTokenValidLocally;
 
     function isCorporateTokenExpiringSoon(token, thresholdSeconds = 7200) {
       const payload = parseCorporateTokenPayload(token);
-      if (!payload || typeof payload.exp !== "number") return false;
+      if (!payload || typeof payload.exp !== "number" || !Number.isFinite(payload.exp)) return false;
+      if (payload.auth_time !== undefined && payload.auth_time !== null) {
+        if (typeof payload.auth_time !== "number" || !Number.isFinite(payload.auth_time)) return false;
+        const maxCapSec = payload.auth_time + Math.floor(SESSION_MAX_AGE_MS / 1000);
+        if (payload.exp >= (maxCapSec - 60)) return false;
+      }
       const remainingMs = (payload.exp * 1000) - Date.now();
       return remainingMs > 0 && remainingMs < (thresholdSeconds * 1000);
     }
+    window.isCorporateTokenExpiringSoon = isCorporateTokenExpiringSoon;
+
+    function isSessionIdleExpired(nowMs = Date.now()) {
+      const store = getSessionStore();
+      if (!store) return false;
+      const raw = store.getItem("last_activity_at");
+      if (raw === null || raw === undefined || raw === "") return false;
+      const lastActivity = Number(raw);
+      if (!Number.isFinite(lastActivity) || lastActivity <= 0) return true;
+      return (nowMs - lastActivity) >= SESSION_IDLE_TIMEOUT_MS;
+    }
+    window.isSessionIdleExpired = isSessionIdleExpired;
+
+    function touchSessionActivity(force = false, nowMs = Date.now()) {
+      const store = getSessionStore();
+      if (!store) return;
+      try {
+        const existing = store.getItem("last_activity_at");
+        if (!force && existing && (nowMs - _lastActivityWriteAt) < ACTIVITY_WRITE_THROTTLE_MS) {
+          return;
+        }
+        store.setItem("last_activity_at", String(nowMs));
+        _lastActivityWriteAt = nowMs;
+      } catch (_) {}
+    }
+    window.touchSessionActivity = touchSessionActivity;
+
+    function validateLocalSessionOrExpire(token, prefillEmail, nowMs = Date.now()) {
+      if (!isCorporateTokenValidLocally(token)) {
+        handleSessionExpired("Your authentication session has expired. Please sign in again.", prefillEmail);
+        return false;
+      }
+      if (isSessionIdleExpired(nowMs)) {
+        handleSessionExpired("Your session expired due to 2 hours of inactivity. Please sign in again.", prefillEmail);
+        return false;
+      }
+      return true;
+    }
+
+    function recordUserActivity() {
+      const store = getSessionStore();
+      if (!store) return;
+      const corpToken = store.getItem("corporate_token") || "";
+      if (!corpToken) return;
+      const nowMs = Date.now();
+      if (!validateLocalSessionOrExpire(corpToken, undefined, nowMs)) {
+        return;
+      }
+      touchSessionActivity(false, nowMs);
+    }
+    window.recordUserActivity = recordUserActivity;
 
     function handleSessionExpired(message, prefillEmail) {
-      const targetEmail = prefillEmail || window.localStorage.getItem("user_email") || window.localStorage.getItem("last_login_email") || "";
-      window.localStorage.removeItem("corporate_token");
-      window.localStorage.removeItem("user_email");
-      window.localStorage.removeItem("user_name");
-      window.localStorage.removeItem("is_admin");
+      const store = getSessionStore();
+      const targetEmail = prefillEmail
+        || (store && (store.getItem("user_email") || store.getItem("last_login_email")))
+        || "";
+      _hadAuthenticatedSession = false;
+      _lastActivityWriteAt = 0;
+      _startupRestoreCompletedAt = 0;
+      _startupRestoredToken = "";
+
+      clearSessionAuthStorage(true);
+      purgeLegacyLocalStorage(true);
+      purgeLegacyFirebaseIndexedDB(true);
 
       if (window._firebaseSignOut && window._firebaseAuth && window._firebaseAuth.currentUser) {
         try { window._firebaseSignOut(window._firebaseAuth).catch(() => {}); } catch (_) {}
@@ -1837,23 +2038,33 @@
       const loginCard = document.getElementById("loginCard");
       const resetCard = document.getElementById("resetPasswordCard");
       const forgotModal = document.getElementById("forgotPasswordModal");
+      const viewUpload = document.getElementById("viewUpload");
+      const viewHITL = document.getElementById("viewHITL");
+      const viewMIS = document.getElementById("viewMIS");
 
       if (userPill) userPill.style.display = "none";
       if (portalNav) portalNav.style.display = "none";
       if (resetCard) resetCard.style.display = "none";
       if (forgotModal) forgotModal.style.display = "none";
-      document.getElementById("viewUpload").style.display = "none";
-      document.getElementById("viewHITL").style.display = "none";
-      document.getElementById("viewMIS").style.display = "none";
+      if (viewUpload) viewUpload.style.display = "none";
+      if (viewHITL) viewHITL.style.display = "none";
+      if (viewMIS) viewMIS.style.display = "none";
       if (loginCard) loginCard.style.display = "block";
       currentTab = "upload";
+
+      misInvoicesCache = [];
+      window._invoiceDataMap = {};
+      const hitlContainer = document.getElementById("hitlQueueContainer");
+      if (hitlContainer) hitlContainer.innerHTML = "";
+      const misTableBody = document.getElementById("misInvoicesTableBody");
+      if (misTableBody) misTableBody.innerHTML = "";
 
       const idInput = document.getElementById("authIdentifierInput");
       const pwdInput = document.getElementById("authPasswordInput");
       if (idInput && !idInput.value && targetEmail) idInput.value = targetEmail;
       if (pwdInput) {
         pwdInput.value = "";
-        if (targetEmail) pwdInput.focus();
+        if (targetEmail && typeof pwdInput.focus === "function") pwdInput.focus();
       }
 
       const statusEl = document.getElementById("loginStatus");
@@ -1876,11 +2087,11 @@
     window.handleSessionExpired = handleSessionExpired;
 
     async function refreshCorporateSessionIfNeeded() {
-      const corpToken = window.localStorage.getItem("corporate_token") || "";
+      const store = getSessionStore();
+      const corpToken = store ? (store.getItem("corporate_token") || "") : "";
       if (!corpToken) return "";
 
-      if (!isCorporateTokenValidLocally(corpToken)) {
-        handleSessionExpired("Your authentication session has expired. Please sign in again.");
+      if (!validateLocalSessionOrExpire(corpToken)) {
         return null;
       }
 
@@ -1896,6 +2107,7 @@
         try {
           const res = await fetch("/api/auth/refresh", {
             method: "POST",
+            cache: "no-store",
             headers: {
               "Authorization": "Bearer " + corpToken,
               "X-Firebase-Token": corpToken
@@ -1903,11 +2115,14 @@
           });
           if (res.ok) {
             const data = await res.json();
-            if (data && data.token) {
-              window.localStorage.setItem("corporate_token", data.token);
-              if (data.email) window.localStorage.setItem("user_email", data.email);
-              window.localStorage.setItem("is_admin", data.is_admin ? "true" : "false");
-              if (data.full_name) window.localStorage.setItem("user_name", data.full_name);
+            if (data && data.token && store) {
+              store.setItem("corporate_token", data.token);
+              if (data.email) {
+                store.setItem("user_email", data.email);
+                store.setItem("last_login_email", data.email);
+              }
+              store.setItem("is_admin", data.is_admin ? "true" : "false");
+              if (data.full_name) store.setItem("user_name", data.full_name);
               return data.token;
             }
           } else if (res.status === 401 || res.status === 403) {
@@ -1924,40 +2139,38 @@
         } finally {
           _refreshInFlight = null;
         }
-        return window.localStorage.getItem("corporate_token") || corpToken;
+        return (store && store.getItem("corporate_token")) || corpToken;
       })();
 
       return _refreshInFlight;
     }
 
-    // Helper to get authentication token (Corporate Session Token preferred, Firebase ID Token fallback)
+    // Helper to get authentication token from tab-scoped sessionStorage
     async function getAuthToken() {
-      const corpToken = window.localStorage.getItem("corporate_token") || "";
+      const store = getSessionStore();
+      const corpToken = store ? (store.getItem("corporate_token") || "") : "";
       if (corpToken) {
         return corpToken;
-      }
-      if (window._firebaseAuth && window._firebaseAuth.currentUser) {
-        try {
-          return await window._firebaseAuth.currentUser.getIdToken();
-        } catch (_) {}
       }
       return "";
     }
     window.getAuthToken = getAuthToken;
 
     async function authorizedFetch(url, options = {}) {
-      let token = null;
-      const corpToken = window.localStorage.getItem("corporate_token") || "";
-      if (corpToken) {
-        token = await refreshCorporateSessionIfNeeded();
-        if (!token) return null;
-      } else {
-        token = await getAuthToken();
-        if (!token) {
-          handleSessionExpired("Please sign in to continue.");
-          return null;
-        }
+      const store = getSessionStore();
+      const corpToken = store ? (store.getItem("corporate_token") || "") : "";
+      if (!corpToken) {
+        handleSessionExpired("Please sign in to continue.");
+        return null;
       }
+      if (!validateLocalSessionOrExpire(corpToken)) {
+        return null;
+      }
+
+      const token = await refreshCorporateSessionIfNeeded();
+      if (!token) return null;
+
+      touchSessionActivity(false);
 
       const headers = new Headers(options.headers || {});
       headers.set("Authorization", "Bearer " + token);
@@ -1979,25 +2192,32 @@
     window.authorizedFetch = authorizedFetch;
 
     function isAuthenticated() {
-      const corpToken = window.localStorage.getItem("corporate_token");
+      const store = getSessionStore();
+      const corpToken = store ? store.getItem("corporate_token") : "";
       if (corpToken) {
-        return isCorporateTokenValidLocally(corpToken);
+        return isCorporateTokenValidLocally(corpToken) && !isSessionIdleExpired();
       }
-      return !!(window._firebaseAuth && window._firebaseAuth.currentUser);
+      return false;
     }
     window.isAuthenticated = isAuthenticated;
 
     function getCurrentUserEmail() {
-      return window.localStorage.getItem("user_email") || (window._firebaseAuth && window._firebaseAuth.currentUser && window._firebaseAuth.currentUser.email) || "";
+      const store = getSessionStore();
+      return (store && store.getItem("user_email")) || "";
     }
     window.getCurrentUserEmail = getCurrentUserEmail;
 
     function setAuthenticatedState(email, isAdmin, fullName) {
       // Security Guardrail: Never auto-authenticate or dismiss the screen during active password reset workflow
-      const urlParams = new URLSearchParams(window.location.search);
-      if (urlParams.get("action") === "reset-password" && urlParams.get("token")) {
+      if (isPasswordResetFlowActive()) {
         console.warn("Blocked setAuthenticatedState: Active password reset workflow takes precedence.");
         return;
+      }
+
+      _hadAuthenticatedSession = true;
+      const store = getSessionStore();
+      if (store && !store.getItem("last_activity_at")) {
+        touchSessionActivity(true);
       }
 
       const loginCard = document.getElementById("loginCard");
@@ -2084,18 +2304,24 @@
 
         const data = await res.json();
         if (res.ok && data.status === "SUCCESS") {
-          const previousEmail = (window.localStorage.getItem("last_login_email") || "").toLowerCase();
+          const store = getSessionStore();
+          const previousEmail = ((store && store.getItem("last_login_email")) || "").toLowerCase();
           if (previousEmail && previousEmail !== (data.email || "").toLowerCase()) {
             selectedFiles = [];
             renderFileList();
             const feed = document.getElementById("documentResultsFeed");
             if (feed) feed.innerHTML = "";
           }
-          window.localStorage.setItem("corporate_token", data.token);
-          window.localStorage.setItem("user_email", data.email);
-          window.localStorage.setItem("last_login_email", data.email);
-          window.localStorage.setItem("user_name", data.full_name || data.username);
-          window.localStorage.setItem("is_admin", data.is_admin ? "true" : "false");
+          purgeLegacyLocalStorage(true);
+          purgeLegacyFirebaseIndexedDB(true);
+          if (store) {
+            store.setItem("corporate_token", data.token);
+            store.setItem("user_email", data.email);
+            store.setItem("last_login_email", data.email);
+            store.setItem("user_name", data.full_name || data.username);
+            store.setItem("is_admin", data.is_admin ? "true" : "false");
+          }
+          touchSessionActivity(true);
 
           if (pwdInput) pwdInput.value = "";
           if (statusEl) {
@@ -2115,7 +2341,7 @@
             statusEl.style.display = "block";
             statusEl.innerHTML = `
               <div style="background:#fef2f2; border:1px solid #fecaca; border-radius:6px; padding:12px; color:#b91c1c; font-size:13px;">
-                <strong>Sign-in Failed:</strong> ${detail}
+                <strong>Sign-in Failed:</strong> ${escapeHtml(detail)}
               </div>
             `;
           }
@@ -2297,31 +2523,201 @@
       }
     };
 
+    async function verifyActiveSession(options = {}) {
+      const reason = options.reason || "wakeup";
+      const allowOfflineRestore = !!options.allowOfflineRestore;
+
+      if (isPasswordResetFlowActive()) return false;
+
+      purgeLegacyLocalStorage(false);
+      purgeLegacyFirebaseIndexedDB(false);
+
+      const store = getSessionStore();
+      const token = store ? (store.getItem("corporate_token") || "") : "";
+      const payload = token ? parseCorporateTokenPayload(token) : null;
+      const savedEmail = (store && store.getItem("user_email")) || (payload && payload.email) || "";
+      const savedName = (store && store.getItem("user_name")) || "";
+      const savedIsAdmin = (store && store.getItem("is_admin") === "true") || false;
+
+      if (!token) {
+        if (_hadAuthenticatedSession || isPortalUiVisible()) {
+          handleSessionExpired("Your authentication session has expired or is missing. Please sign in again.", savedEmail);
+        }
+        return false;
+      }
+
+      if (!validateLocalSessionOrExpire(token, savedEmail)) {
+        return false;
+      }
+
+      if (_verifyInFlight) {
+        return _verifyInFlight;
+      }
+
+      _verifyInFlight = (async () => {
+        try {
+          const meRes = await fetch("/api/auth/me", {
+            cache: "no-store",
+            headers: {
+              "Authorization": "Bearer " + token,
+              "X-Firebase-Token": token
+            }
+          });
+
+          // Abort if user explicitly logged out or rotated session while request was in flight
+          const currentToken = store ? (store.getItem("corporate_token") || "") : "";
+          if (currentToken !== token) {
+            return false;
+          }
+
+          if (meRes.ok) {
+            const meData = await meRes.json();
+            const verifiedEmail = meData.email || savedEmail;
+            const verifiedAdmin = !!meData.is_admin;
+            const verifiedName = meData.full_name || savedName;
+            if (store) {
+              if (verifiedEmail) {
+                store.setItem("user_email", verifiedEmail);
+                store.setItem("last_login_email", verifiedEmail);
+              }
+              store.setItem("is_admin", verifiedAdmin ? "true" : "false");
+              if (verifiedName) store.setItem("user_name", verifiedName);
+              if (!store.getItem("last_activity_at")) {
+                touchSessionActivity(true);
+              }
+            }
+            if (reason === "startup") {
+              _startupRestoreCompletedAt = Date.now();
+              _startupRestoredToken = token;
+            }
+            if (!isPortalUiVisible() || !_hadAuthenticatedSession) {
+              setAuthenticatedState(verifiedEmail, verifiedAdmin, verifiedName);
+            }
+            return true;
+          }
+
+          if (meRes.status === 401 || meRes.status === 403) {
+            let errDetail = "Your previous session has expired or is no longer valid. Please sign in again.";
+            try {
+              const errJson = await meRes.json();
+              if (errJson && typeof errJson.detail === "string") errDetail = errJson.detail;
+            } catch (_) {}
+            handleSessionExpired(errDetail, savedEmail);
+            return false;
+          }
+
+          if (!isCorporateTokenValidLocally(token) || isSessionIdleExpired()) {
+            handleSessionExpired("Your previous session has expired. Please sign in again.", savedEmail);
+            return false;
+          }
+          if (allowOfflineRestore && !isPortalUiVisible() && savedEmail) {
+            setAuthenticatedState(savedEmail, savedIsAdmin || savedEmail === "aic1176@aurogroup.com", savedName);
+          }
+          return true;
+        } catch (_) {
+          const currentToken = store ? (store.getItem("corporate_token") || "") : "";
+          if (currentToken !== token) {
+            return false;
+          }
+          if (!isCorporateTokenValidLocally(token) || isSessionIdleExpired()) {
+            handleSessionExpired("Your previous session has expired. Please sign in again.", savedEmail);
+            return false;
+          }
+          if (allowOfflineRestore && !isPortalUiVisible() && savedEmail) {
+            setAuthenticatedState(savedEmail, savedIsAdmin || savedEmail === "aic1176@aurogroup.com", savedName);
+          }
+          return true;
+        } finally {
+          _verifyInFlight = null;
+        }
+      })();
+
+      return _verifyInFlight;
+    }
+    window.verifyActiveSession = verifyActiveSession;
+
+    function checkSessionTimeoutLocally() {
+      if (isPasswordResetFlowActive()) return false;
+      const store = getSessionStore();
+      const token = store ? (store.getItem("corporate_token") || "") : "";
+      if (!token) {
+        if (_hadAuthenticatedSession || isPortalUiVisible()) {
+          handleSessionExpired("Your authentication session has expired. Please sign in again.");
+          return true;
+        }
+        return false;
+      }
+      return !validateLocalSessionOrExpire(token);
+    }
+    window.checkSessionTimeoutLocally = checkSessionTimeoutLocally;
+
+    // Edge BFCache / Sleeping Tab Wakeup Guards
+    if (typeof window.addEventListener === "function") {
+      window.addEventListener("pageshow", (event) => {
+        if (isPasswordResetFlowActive()) return;
+        const store = getSessionStore();
+        const currentToken = store ? (store.getItem("corporate_token") || "") : "";
+        if (
+          !(event && event.persisted) &&
+          currentToken &&
+          _startupRestoredToken === currentToken &&
+          (Date.now() - _startupRestoreCompletedAt) < 500
+        ) {
+          return;
+        }
+        verifyActiveSession({
+          reason: event && event.persisted ? "pageshow-bfcache" : "pageshow",
+          allowOfflineRestore: false
+        });
+      });
+    }
+
+    if (typeof document.addEventListener === "function") {
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible" && !isPasswordResetFlowActive()) {
+          verifyActiveSession({ reason: "visibilitychange", allowOfflineRestore: false });
+        }
+      });
+
+      ["pointerdown", "keydown", "mousedown", "touchstart", "scroll"].forEach((evtName) => {
+        document.addEventListener(evtName, recordUserActivity, { passive: true });
+      });
+    }
+
+    const _sessionMonitorInterval = setInterval(() => {
+      checkSessionTimeoutLocally();
+    }, SESSION_CHECK_INTERVAL_MS);
+    if (_sessionMonitorInterval && typeof _sessionMonitorInterval.unref === "function") {
+      _sessionMonitorInterval.unref();
+    }
+
     // Check URL on Load for Password Reset Action vs Normal Session Restore
-    const urlParams = new URLSearchParams(window.location.search);
+    const urlParams = new URLSearchParams((window.location && window.location.search) || "");
     const isPasswordResetFlow = (urlParams.get("action") === "reset-password" && !!urlParams.get("token"));
 
     if (isPasswordResetFlow) {
       // 1. Immediately purge any active session to prevent auto-login
-      window.localStorage.removeItem("corporate_token");
-      window.localStorage.removeItem("user_email");
-      window.localStorage.removeItem("user_name");
-      window.localStorage.removeItem("is_admin");
+      clearSessionAuthStorage(false);
+      purgeLegacyLocalStorage(true);
+      purgeLegacyFirebaseIndexedDB(true);
 
       const loginCard = document.getElementById("loginCard");
       const resetCard = document.getElementById("resetPasswordCard");
       const forgotCard = document.getElementById("forgotPasswordCard");
       const portalNav = document.getElementById("portalNav");
       const userPill = document.getElementById("userPill");
+      const viewUpload = document.getElementById("viewUpload");
+      const viewHITL = document.getElementById("viewHITL");
+      const viewMIS = document.getElementById("viewMIS");
 
       if (portalNav) portalNav.style.display = "none";
       if (userPill) userPill.style.display = "none";
       if (loginCard) loginCard.style.display = "none";
       if (forgotCard) forgotCard.style.display = "none";
       if (resetCard) resetCard.style.display = "block";
-      document.getElementById("viewUpload").style.display = "none";
-      document.getElementById("viewHITL").style.display = "none";
-      document.getElementById("viewMIS").style.display = "none";
+      if (viewUpload) viewUpload.style.display = "none";
+      if (viewHITL) viewHITL.style.display = "none";
+      if (viewMIS) viewMIS.style.display = "none";
 
       const resetToken = urlParams.get("token");
       const urlEmail = urlParams.get("email");
@@ -2359,7 +2755,7 @@
                   <span>Password Reset Link Expired or Invalid</span>
                 </div>
                 <p style="font-size:13px; line-height:1.5; margin:0 0 14px 0; color:#7f1d1d;">
-                  ${data.detail || "This single-use password reset link is invalid, has expired (15-minute validity), or has already been used."}
+                  ${escapeHtml(data.detail || "This single-use password reset link is invalid, has expired (15-minute validity), or has already been used.")}
                 </p>
                 <button type="button" class="btn-primary" onclick="cancelPasswordReset()" style="padding:10px 18px; font-size:13px;">
                   Return to Sign In & Request New Link
@@ -2373,71 +2769,31 @@
         showToast("Network error verifying password reset link.");
       });
     } else {
-      // Restore persistent session on page load ONLY if not in password reset workflow
-      const savedToken = window.localStorage.getItem("corporate_token");
-      const savedEmail = window.localStorage.getItem("user_email");
-      const savedName = window.localStorage.getItem("user_name") || "";
-      const savedIsAdmin = window.localStorage.getItem("is_admin") === "true";
+      // Restore tab-scoped session on page load ONLY if valid locally, not idle-expired, and verified with backend
+      const store = getSessionStore();
+      const savedToken = store ? store.getItem("corporate_token") : "";
+      const payload = savedToken ? parseCorporateTokenPayload(savedToken) : null;
+      const savedEmail = (store && store.getItem("user_email")) || (payload && payload.email) || "";
 
-      const showLoginScreen = () => {
-        const userPill = document.getElementById("userPill");
-        const portalNav = document.getElementById("portalNav");
-        const loginCard = document.getElementById("loginCard");
-        if (userPill) userPill.style.display = "none";
-        if (portalNav) portalNav.style.display = "none";
-        if (loginCard) loginCard.style.display = "block";
-        document.getElementById("viewUpload").style.display = "none";
-        document.getElementById("viewHITL").style.display = "none";
-        document.getElementById("viewMIS").style.display = "none";
-      };
+      showLoginScreen();
 
-      if (savedToken && savedEmail) {
+      if (savedToken) {
         if (!isCorporateTokenValidLocally(savedToken)) {
-          showLoginScreen();
           handleSessionExpired("Your previous session has expired. Please sign in again.", savedEmail);
+        } else if (isSessionIdleExpired()) {
+          handleSessionExpired("Your previous session expired due to inactivity. Please sign in again.", savedEmail);
         } else {
-          // Verify cached session with backend before exposing portal UI
-          showLoginScreen();
-          (async () => {
-            try {
-              const meRes = await fetch("/api/auth/me", {
-                headers: {
-                  "Authorization": "Bearer " + savedToken,
-                  "X-Firebase-Token": savedToken
-                }
-              });
-              if (meRes.ok) {
-                const meData = await meRes.json();
-                const verifiedEmail = meData.email || savedEmail;
-                const verifiedAdmin = !!meData.is_admin;
-                const verifiedName = meData.full_name || savedName;
-                window.localStorage.setItem("user_email", verifiedEmail);
-                window.localStorage.setItem("last_login_email", verifiedEmail);
-                window.localStorage.setItem("is_admin", verifiedAdmin ? "true" : "false");
-                if (verifiedName) window.localStorage.setItem("user_name", verifiedName);
-                setAuthenticatedState(verifiedEmail, verifiedAdmin, verifiedName);
-              } else if (meRes.status === 401 || meRes.status === 403) {
-                handleSessionExpired("Your previous session has expired or is no longer valid. Please sign in again.", savedEmail);
-              } else {
-                setAuthenticatedState(savedEmail, savedIsAdmin || savedEmail === "aic1176@aurogroup.com", savedName);
-              }
-            } catch (_) {
-              if (isCorporateTokenValidLocally(savedToken)) {
-                setAuthenticatedState(savedEmail, savedIsAdmin || savedEmail === "aic1176@aurogroup.com", savedName);
-              } else {
-                handleSessionExpired("Your previous session has expired. Please sign in again.", savedEmail);
-              }
-            }
-          })();
+          verifyActiveSession({ reason: "startup", allowOfflineRestore: true });
         }
       } else {
-        showLoginScreen();
+        clearSessionAuthStorage(true);
       }
     }
 
     // Sign out handler (CHECK 01: Token Revocation)
     window.logoutUser = async () => {
-      const token = window.localStorage.getItem("corporate_token");
+      const store = getSessionStore();
+      const token = store ? store.getItem("corporate_token") : "";
       if (token) {
         try {
           await fetch("/api/auth/logout", {
@@ -2446,26 +2802,36 @@
           });
         } catch (_) {}
       }
-      window.localStorage.removeItem("corporate_token");
-      window.localStorage.removeItem("user_email");
-      window.localStorage.removeItem("last_login_email");
-      window.localStorage.removeItem("user_name");
-      window.localStorage.removeItem("is_admin");
+      _hadAuthenticatedSession = false;
+      _lastActivityWriteAt = 0;
+      _startupRestoreCompletedAt = 0;
+      _startupRestoredToken = "";
+      clearSessionAuthStorage(false);
+      purgeLegacyLocalStorage(true);
+      purgeLegacyFirebaseIndexedDB(true);
+      misInvoicesCache = [];
+      window._invoiceDataMap = {};
       if (window._firebaseSignOut && window._firebaseAuth) {
         try { await window._firebaseSignOut(window._firebaseAuth); } catch (_) {}
       }
-      window.location.reload();
+      if (window.location && typeof window.location.reload === "function") {
+        window.location.reload();
+      } else {
+        showLoginScreen();
+      }
     };
 
     // Dropzone & File Management
     const dropZone = document.getElementById("dropZone");
-    dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dragover"); });
-    dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
-    dropZone.addEventListener("drop", (e) => {
-      e.preventDefault();
-      dropZone.classList.remove("dragover");
-      handleFiles(e.dataTransfer.files);
-    });
+    if (dropZone) {
+      dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dragover"); });
+      dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+      dropZone.addEventListener("drop", (e) => {
+        e.preventDefault();
+        dropZone.classList.remove("dragover");
+        handleFiles(e.dataTransfer.files);
+      });
+    }
 
     const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB strict limit per specification
 
@@ -3826,7 +4192,10 @@
     try {
       const { initializeApp } = await import("https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js");
       const {
+        initializeAuth,
+        inMemoryPersistence,
         getAuth,
+        setPersistence,
         sendSignInLinkToEmail,
         signInWithCustomToken,
         signOut,
@@ -3843,7 +4212,7 @@
       };
 
       try {
-        const configResp = await fetch("/api/config/firebase");
+        const configResp = await fetch("/api/config/firebase", { cache: "no-store" });
         if (configResp.ok) {
           const remoteConfig = await configResp.json();
           if (remoteConfig && remoteConfig.apiKey) {
@@ -3855,95 +4224,124 @@
       }
 
       const app = initializeApp(firebaseConfig);
-      const auth = getAuth(app);
+      let auth;
+      try {
+        // Strictly enforce in-memory persistence so Firebase never writes credentials to Edge IndexedDB
+        auth = initializeAuth(app, { persistence: inMemoryPersistence });
+      } catch (_) {
+        auth = getAuth(app);
+        try { await setPersistence(auth, inMemoryPersistence); } catch (_) {}
+      }
       window._firebaseAuth = auth;
       window._firebaseSignOut = signOut;
       window._firebaseSignInWithCustomToken = signInWithCustomToken;
       window._firebaseSendSignInLinkToEmail = sendSignInLinkToEmail;
 
-      if (isSignInWithEmailLink(auth, window.location.href)) {
-        let email = window.localStorage.getItem("emailForSignIn");
+      let activeEmailLinkSignInInProgress = false;
+      const isEmailLinkFlow = isSignInWithEmailLink(auth, window.location.href);
+      const clearEmailForSignInStorage = () => {
+        try { window.sessionStorage && window.sessionStorage.removeItem("emailForSignIn"); } catch (_) {}
+        try { window.localStorage && window.localStorage.removeItem("emailForSignIn"); } catch (_) {}
+      };
+
+      if (!isEmailLinkFlow && typeof window.purgeLegacyFirebaseIndexedDB === "function") {
+        window.purgeLegacyFirebaseIndexedDB(true);
+      }
+
+      if (isEmailLinkFlow) {
+        let email = (window.sessionStorage && window.sessionStorage.getItem("emailForSignIn"))
+          || (window.localStorage && window.localStorage.getItem("emailForSignIn"));
         if (!email) {
           email = window.prompt("Confirm your corporate email address to finalize sign-in:");
         }
         if (email) {
-          signInWithEmailLink(auth, email.trim().toLowerCase(), window.location.href)
+          activeEmailLinkSignInInProgress = true;
+          const normalizedEmail = email.trim().toLowerCase();
+          signInWithEmailLink(auth, normalizedEmail, window.location.href)
             .then(async () => {
-              window.localStorage.removeItem("emailForSignIn");
+              clearEmailForSignInStorage();
               window.history.replaceState({}, document.title, window.location.pathname);
-              showToast("Welcome! Single Sign-On authenticated.");
+
               if (auth.currentUser) {
+                const userEmail = (auth.currentUser.email || normalizedEmail).toLowerCase().trim();
+                const isAllowed = ALLOWED_EMAILS.includes(userEmail) || ALLOWED_DOMAINS.some(d => userEmail.endsWith("@" + d) || userEmail.endsWith("." + d));
+                if (!isAllowed) {
+                  try { await signOut(auth); } catch (_) {}
+                  showToast("Account domain is not authorized.");
+                  return;
+                }
+
                 const idToken = await auth.currentUser.getIdToken();
                 const sRes = await fetch("/api/auth/session-from-firebase", {
                   method: "POST",
+                  cache: "no-store",
                   headers: { "Authorization": "Bearer " + idToken, "X-Firebase-Token": idToken }
                 });
-                const d = await sRes.json();
-                if (d.token) {
-                  window.localStorage.setItem("corporate_token", d.token);
-                  window.localStorage.setItem("user_email", d.email);
-                  setAuthenticatedState(d.email, d.is_admin);
+                let d = null;
+                try { d = await sRes.json(); } catch (_) {}
+                if (sRes.ok && d && d.token) {
+                  if (typeof window.purgeLegacyLocalStorage === "function") window.purgeLegacyLocalStorage(true);
+                  if (typeof window.purgeLegacyFirebaseIndexedDB === "function") window.purgeLegacyFirebaseIndexedDB(true);
+                  const verifiedEmail = (d.email || userEmail).toLowerCase().trim();
+                  if (window.sessionStorage) {
+                    window.sessionStorage.setItem("corporate_token", d.token);
+                    window.sessionStorage.setItem("user_email", verifiedEmail);
+                    window.sessionStorage.setItem("last_login_email", verifiedEmail);
+                    window.sessionStorage.setItem("is_admin", d.is_admin ? "true" : "false");
+                    if (d.full_name) window.sessionStorage.setItem("user_name", d.full_name);
+                  }
+                  if (typeof window.touchSessionActivity === "function") {
+                    window.touchSessionActivity(true);
+                  } else if (window.sessionStorage) {
+                    window.sessionStorage.setItem("last_activity_at", String(Date.now()));
+                  }
+                  try { await signOut(auth); } catch (_) {}
+                  setAuthenticatedState(verifiedEmail, !!d.is_admin, d.full_name || "");
+                  showToast("Welcome! Single Sign-On authenticated.");
+                } else {
+                  try { await signOut(auth); } catch (_) {}
+                  showToast((d && d.detail) || "Authentication failed or session expired.");
                 }
               }
             })
             .catch(() => {
+              clearEmailForSignInStorage();
               window.history.replaceState({}, document.title, window.location.pathname);
               showToast("Authentication failed or link expired.");
+            })
+            .finally(() => {
+              activeEmailLinkSignInInProgress = false;
             });
+        } else {
+          clearEmailForSignInStorage();
         }
       }
 
       onAuthStateChanged(auth, async (user) => {
         // Defense-in-depth: Never auto-authenticate or dismiss screen during password reset
-        const urlParams = new URLSearchParams(window.location.search);
-        if (urlParams.get("action") === "reset-password" && urlParams.get("token")) {
+        const currentUrlParams = new URLSearchParams(window.location.search);
+        if (currentUrlParams.get("action") === "reset-password" && currentUrlParams.get("token")) {
           if (user) {
             try { await signOut(auth); } catch (_) {}
           }
           return;
         }
 
-        if (user) {
-          // If an active valid corporate password session is already established, do not let background Firebase state clobber it
-          const activeCorpToken = window.localStorage.getItem("corporate_token");
-          if (activeCorpToken && isCorporateTokenValidLocally(activeCorpToken)) {
-            return;
-          }
+        if (!user) return;
 
-          let email = (user.email || "").toLowerCase().trim();
-          if (!email) {
-            try {
-              const tokenResult = await user.getIdTokenResult();
-              email = (tokenResult?.claims?.email || "").toLowerCase().trim();
-            } catch (_) {}
-          }
-          const isAllowed = ALLOWED_EMAILS.includes(email) || ALLOWED_DOMAINS.some(d => email.endsWith("@" + d) || email.endsWith("." + d));
-          if (!isAllowed) {
-            await signOut(auth);
-            showToast("Account domain is not authorized.");
-            return;
-          }
+        // If an active valid corporate session is already established, do not let background Firebase state clobber it
+        const activeCorpToken = window.sessionStorage ? window.sessionStorage.getItem("corporate_token") : "";
+        if (activeCorpToken && isCorporateTokenValidLocally(activeCorpToken) && !isSessionIdleExpired()) {
+          return;
+        }
 
-          let isAdmin = ["aic1176@aurogroup.com", "umamaheswara.g@ent.aurogroup.com", "mahender.r@tridentchemphar.com"].includes(email);
-          try {
-            const idToken = await user.getIdToken();
-            const sRes = await fetch("/api/auth/session-from-firebase", {
-              method: "POST",
-              headers: { "Authorization": "Bearer " + idToken, "X-Firebase-Token": idToken }
-            });
-            if (sRes.ok) {
-              const sData = await sRes.json();
-              if (sData.token) {
-                window.localStorage.setItem("corporate_token", sData.token);
-                window.localStorage.setItem("user_email", sData.email || email);
-                window.localStorage.setItem("last_login_email", sData.email || email);
-                window.localStorage.setItem("is_admin", sData.is_admin ? "true" : "false");
-                isAdmin = !!sData.is_admin;
-              }
-            }
-          } catch (_) {}
-
-          setAuthenticatedState(email, isAdmin);
+        // Never silently auto-authenticate from residual Firebase auth state unless actively completing signInWithEmailLink
+        if (!activeEmailLinkSignInInProgress) {
+          try { await signOut(auth); } catch (_) {}
+          if (typeof window.purgeLegacyFirebaseIndexedDB === "function") {
+            window.purgeLegacyFirebaseIndexedDB(true);
+          }
+          return;
         }
       });
     } catch (fbErr) {
