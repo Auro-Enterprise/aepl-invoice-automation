@@ -1139,25 +1139,35 @@ class FirestoreAuditService:
     # User IAM & Credential Storage
     def get_user(self, identifier: str) -> Optional[Dict[str, Any]]:
         ident = (identifier or "").strip().lower()
-        if ident in _USERS_MEM:
-            return _USERS_MEM[ident]
+        mem_user = _USERS_MEM.get(ident)
         if self.db:
             try:
-                # Query by employee_id
-                docs = self.db.collection("users").where("employee_id", "==", ident).limit(1).stream()
-                for d in docs:
-                    return d.to_dict()
-                # Query by username
-                docs = self.db.collection("users").where("username", "==", ident).limit(1).stream()
-                for d in docs:
-                    return d.to_dict()
-                # Query by email
-                docs = self.db.collection("users").where("email", "==", ident).limit(1).stream()
-                for d in docs:
-                    return d.to_dict()
+                fs_user = None
+                if mem_user:
+                    doc = self.db.collection("users").document(mem_user["username"].lower()).get()
+                    if doc.exists:
+                        fs_user = doc.to_dict()
+                else:
+                    for field in ("employee_id", "username", "email"):
+                        docs = self.db.collection("users").where(field, "==", ident).limit(1).stream()
+                        for d in docs:
+                            fs_user = d.to_dict()
+                            break
+                        if fs_user:
+                            break
+                if fs_user:
+                    if mem_user:
+                        # Keep authoritative PREDEFINED_USERS identity/role while reading updated password hashes across workers/restarts
+                        merged = dict(mem_user)
+                        if fs_user.get("password_hash"):
+                            merged["password_hash"] = fs_user["password_hash"]
+                        if fs_user.get("updated_at"):
+                            merged["updated_at"] = fs_user["updated_at"]
+                        return merged
+                    return fs_user
             except Exception as e:
                 logger.warning(f"Firestore get_user error: {e}")
-        return None
+        return mem_user
 
     def save_user(self, user_data: Dict[str, Any]):
         uname = user_data["username"].lower()
@@ -1191,9 +1201,6 @@ class FirestoreAuditService:
                 logger.warning(f"Firestore password_resets create notice: {e}")
 
     def get_password_reset(self, token_hash: str) -> Optional[Dict[str, Any]]:
-        record = self._password_resets_mem.get(token_hash)
-        if record and not record.get("consumed") and record.get("exp", 0) > time.time():
-            return record
         if self.db:
             try:
                 d = self.db.collection("password_resets").document(token_hash).get()
@@ -1201,8 +1208,12 @@ class FirestoreAuditService:
                     data = d.to_dict()
                     if data and not data.get("consumed") and data.get("exp", 0) > time.time():
                         return data
+                    return None
             except Exception as e:
                 logger.warning(f"Firestore password_resets lookup notice: {e}")
+        record = self._password_resets_mem.get(token_hash)
+        if record and not record.get("consumed") and record.get("exp", 0) > time.time():
+            return record
         return None
 
     def consume_password_reset(self, token_hash: str):
@@ -1769,8 +1780,31 @@ def validate_sap_schema(payload_dict: dict) -> Tuple[bool, Optional[str], Option
 # ---------------------------------------------------------
 # 7. AUTHENTICATION & SECURITY SCREENING
 # ---------------------------------------------------------
-SESSION_SECRET = os.getenv("SESSION_SECRET", "aepl-invoice-secure-session-secret-2026-key")
+SESSION_SECRET = os.getenv("SESSION_SECRET") or "aepl-invoice-secure-session-secret-2026-key"
 _REVOKED_TOKENS: Set[str] = set()
+
+
+def _extract_bearer_token(authorization: Optional[str], x_firebase_token: Optional[str]) -> Optional[str]:
+    token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    if not token and x_firebase_token:
+        token = x_firebase_token.strip()
+    return token or None
+
+
+def _is_token_revoked(token: str, jti: Optional[str] = None) -> bool:
+    if token in _REVOKED_TOKENS or (jti and jti in _REVOKED_TOKENS):
+        return True
+    if jti and firestore_client is not None:
+        try:
+            if firestore_client.collection("revoked_tokens").document(jti).get().exists:
+                _REVOKED_TOKENS.add(jti)
+                return True
+        except Exception:
+            pass
+    return False
+
 
 def create_corporate_session_token(email: str) -> str:
     payload = {
@@ -1784,10 +1818,9 @@ def create_corporate_session_token(email: str) -> str:
     signature = hmac.new(SESSION_SECRET.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
     return f"{payload_b64}.{signature}"
 
+
 def verify_corporate_session_token(token: str) -> Optional[str]:
     try:
-        if token in _REVOKED_TOKENS:
-            return None
         parts = token.split(".")
         if len(parts) != 2:
             return None
@@ -1799,11 +1832,13 @@ def verify_corporate_session_token(token: str) -> Optional[str]:
         payload = json.loads(payload_json)
         if payload.get("exp", 0) < time.time():
             return None
-        if payload.get("jti") and payload["jti"] in _REVOKED_TOKENS:
+        jti = payload.get("jti")
+        if _is_token_revoked(token, jti):
             return None
         return payload.get("email")
     except Exception:
         return None
+
 
 def revoke_session_token(token: str):
     try:
@@ -1812,32 +1847,39 @@ def revoke_session_token(token: str):
         if len(parts) == 2:
             payload_json = base64.urlsafe_b64decode(parts[0].encode()).decode()
             payload = json.loads(payload_json)
-            if payload.get("jti"):
-                _REVOKED_TOKENS.add(payload["jti"])
+            jti = payload.get("jti")
+            if jti:
+                _REVOKED_TOKENS.add(jti)
+                if firestore_client is not None:
+                    try:
+                        firestore_client.collection("revoked_tokens").document(jti).set({
+                            "jti": jti,
+                            "exp": payload.get("exp", 0),
+                            "revoked_at": datetime.now(timezone.utc).isoformat(),
+                        })
+                    except Exception:
+                        pass
     except Exception:
         pass
 
 
-
-
 def verify_corporate_user(authorization: Optional[str], x_firebase_token: Optional[str]) -> str:
-    token = None
-    if authorization and authorization.lower().startswith("bearer "):
-        token = authorization.split(" ", 1)[1].strip()
-    elif x_firebase_token:
-        token = x_firebase_token.strip()
+    token = _extract_bearer_token(authorization, x_firebase_token)
 
     if not token:
         raise HTTPException(status_code=401, detail="Missing authentication session token.")
 
     email = None
-    # 1. Attempt verification with Firebase ID Token
-    try:
-        decoded = firebase_auth.verify_id_token(token)
-        email = (decoded.get("email") or "").lower().strip()
-    except Exception:
-        # 2. Fallback to Corporate Session Token
+    if token.count(".") == 1:
+        # 1. Corporate HMAC-SHA256 Session Token (payload.signature)
         email = verify_corporate_session_token(token)
+    else:
+        # 2. Firebase ID Token (3-segment JWT), with fallback to Corporate Session Token
+        try:
+            decoded = firebase_auth.verify_id_token(token)
+            email = (decoded.get("email") or "").lower().strip()
+        except Exception:
+            email = verify_corporate_session_token(token)
 
     if not email:
         raise HTTPException(status_code=401, detail="Invalid or expired authentication session. Please sign in again.")
@@ -3289,13 +3331,6 @@ async def corporate_login(payload: AuthLoginRequest, request: Request):
     session_token = create_corporate_session_token(user["email"])
     is_admin = is_admin_user(user["email"])
 
-    custom_token = None
-    try:
-        raw_token = firebase_auth.create_custom_token(user["email"], {"email": user["email"], "is_admin": is_admin})
-        custom_token = raw_token.decode("utf-8") if isinstance(raw_token, bytes) else str(raw_token)
-    except Exception as exc:
-        logger.warning(f"Firebase custom token generation notice: {exc}")
-
     return JSONResponse({
         "status": "SUCCESS",
         "email": user["email"],
@@ -3304,7 +3339,7 @@ async def corporate_login(payload: AuthLoginRequest, request: Request):
         "role": user.get("role", "user"),
         "is_admin": is_admin,
         "token": session_token,
-        "custom_token": custom_token,
+        "custom_token": None,
         "message": f"Welcome, {user.get('full_name', user['username'])}. Successfully signed in.",
     })
 
@@ -3431,11 +3466,7 @@ async def corporate_logout(
     Enterprise Single Sign-Out & Token Revocation Gateway (CHECK 01).
     Explicitly blacklists the corporate session token, neutralizing re-use or session hijacking.
     """
-    token = None
-    if authorization and authorization.lower().startswith("bearer "):
-        token = authorization.split(" ", 1)[1].strip()
-    elif x_firebase_token:
-        token = x_firebase_token.strip()
+    token = _extract_bearer_token(authorization, x_firebase_token)
 
     if token:
         revoke_session_token(token)
@@ -3459,6 +3490,24 @@ async def session_from_firebase(
     })
 
 
+@app.post("/api/auth/refresh")
+async def refresh_corporate_session(
+    authorization: Optional[str] = Header(default=None),
+    x_firebase_token: Optional[str] = Header(default=None),
+):
+    """Issues a fresh 8-hour Corporate Session Token only when the caller presents an active, unexpired, non-revoked session."""
+    email = verify_corporate_user(authorization, x_firebase_token)
+    session_token = create_corporate_session_token(email)
+    user = audit_service.get_user(email) or {}
+    return JSONResponse({
+        "status": "SUCCESS",
+        "email": email,
+        "full_name": user.get("full_name", ""),
+        "token": session_token,
+        "is_admin": is_admin_user(email),
+    })
+
+
 @app.get("/api/auth/me")
 async def get_current_user_profile(
     authorization: Optional[str] = Header(default=None),
@@ -3466,8 +3515,10 @@ async def get_current_user_profile(
 ):
     """Returns the authenticated user's profile and administrative role flag."""
     email = verify_corporate_user(authorization, x_firebase_token)
+    user = audit_service.get_user(email) or {}
     return JSONResponse({
         "email": email,
+        "full_name": user.get("full_name", ""),
         "is_admin": is_admin_user(email),
         "admin_email": ALERT_EMAIL_RECIPIENT,
     })

@@ -2,7 +2,7 @@
 
 > Enterprise-grade Accounts Payable automation engine powered by Google Gemini 3.8 Flash, Google Cloud Model Armor, and SAP S/4HANA BAPI integration.
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/AuroGroupAutomationBot/aepl-invoice-automation/actions)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/Auro-Enterprise/aepl-invoice-automation/actions)
 [![Cloud Run](https://img.shields.io/badge/Google%20Cloud%20Run-us--central1-blue.svg)](https://cloud.google.com/run)
 [![Model](https://img.shields.io/badge/Vertex%20AI-Gemini%203.8%20Flash-blueviolet.svg)](https://cloud.google.com/vertex-ai)
 [![Security](https://img.shields.io/badge/Security-Model%20Armor-success.svg)](https://cloud.google.com/security)
@@ -197,7 +197,7 @@ erDiagram
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/AuroGroupAutomationBot/aepl-invoice-automation.git
+   git clone https://github.com/Auro-Enterprise/aepl-invoice-automation.git
    cd aepl-invoice-automation
    ```
 

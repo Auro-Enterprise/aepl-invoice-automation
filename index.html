@@ -1782,24 +1782,213 @@
       if (tabName === "mis") loadMISDashboard();
     };
 
-    // Helper to get authentication token (Firebase ID Token or Corporate Session Token)
+    let _refreshInFlight = null;
+    let _lastExpiredToastAt = 0;
+
+    function escapeHtml(str) {
+      return String(str || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function parseCorporateTokenPayload(token) {
+      if (!token || typeof token !== "string") return null;
+      const parts = token.split(".");
+      if (parts.length !== 2) return null;
+      try {
+        let b64 = parts[0].replace(/-/g, "+").replace(/_/g, "/");
+        while (b64.length % 4 !== 0) b64 += "=";
+        return JSON.parse(atob(b64));
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function isCorporateTokenValidLocally(token) {
+      const payload = parseCorporateTokenPayload(token);
+      if (!payload || typeof payload.exp !== "number") return false;
+      return (payload.exp * 1000) > (Date.now() + 15000);
+    }
+    window.isCorporateTokenValidLocally = isCorporateTokenValidLocally;
+
+    function isCorporateTokenExpiringSoon(token, thresholdSeconds = 7200) {
+      const payload = parseCorporateTokenPayload(token);
+      if (!payload || typeof payload.exp !== "number") return false;
+      const remainingMs = (payload.exp * 1000) - Date.now();
+      return remainingMs > 0 && remainingMs < (thresholdSeconds * 1000);
+    }
+
+    function handleSessionExpired(message, prefillEmail) {
+      const targetEmail = prefillEmail || window.localStorage.getItem("user_email") || window.localStorage.getItem("last_login_email") || "";
+      window.localStorage.removeItem("corporate_token");
+      window.localStorage.removeItem("user_email");
+      window.localStorage.removeItem("user_name");
+      window.localStorage.removeItem("is_admin");
+
+      if (window._firebaseSignOut && window._firebaseAuth && window._firebaseAuth.currentUser) {
+        try { window._firebaseSignOut(window._firebaseAuth).catch(() => {}); } catch (_) {}
+      }
+
+      const userPill = document.getElementById("userPill");
+      const portalNav = document.getElementById("portalNav");
+      const loginCard = document.getElementById("loginCard");
+      const resetCard = document.getElementById("resetPasswordCard");
+      const forgotModal = document.getElementById("forgotPasswordModal");
+
+      if (userPill) userPill.style.display = "none";
+      if (portalNav) portalNav.style.display = "none";
+      if (resetCard) resetCard.style.display = "none";
+      if (forgotModal) forgotModal.style.display = "none";
+      document.getElementById("viewUpload").style.display = "none";
+      document.getElementById("viewHITL").style.display = "none";
+      document.getElementById("viewMIS").style.display = "none";
+      if (loginCard) loginCard.style.display = "block";
+      currentTab = "upload";
+
+      const idInput = document.getElementById("authIdentifierInput");
+      const pwdInput = document.getElementById("authPasswordInput");
+      if (idInput && !idInput.value && targetEmail) idInput.value = targetEmail;
+      if (pwdInput) {
+        pwdInput.value = "";
+        if (targetEmail) pwdInput.focus();
+      }
+
+      const statusEl = document.getElementById("loginStatus");
+      if (statusEl) {
+        const noticeText = message || "Your authentication session has expired. Please sign in again.";
+        statusEl.style.display = "block";
+        statusEl.innerHTML = `
+          <div style="background:#fffbeb; border:1px solid #fde68a; border-radius:6px; padding:12px; color:#92400e; font-size:13px;">
+            <strong>Session Expired:</strong> ${escapeHtml(noticeText)}
+          </div>
+        `;
+      }
+
+      const now = Date.now();
+      if (now - _lastExpiredToastAt > 2500) {
+        _lastExpiredToastAt = now;
+        showToast("Session expired. Please sign in again.");
+      }
+    }
+    window.handleSessionExpired = handleSessionExpired;
+
+    async function refreshCorporateSessionIfNeeded() {
+      const corpToken = window.localStorage.getItem("corporate_token") || "";
+      if (!corpToken) return "";
+
+      if (!isCorporateTokenValidLocally(corpToken)) {
+        handleSessionExpired("Your authentication session has expired. Please sign in again.");
+        return null;
+      }
+
+      if (!isCorporateTokenExpiringSoon(corpToken)) {
+        return corpToken;
+      }
+
+      if (_refreshInFlight) {
+        return _refreshInFlight;
+      }
+
+      _refreshInFlight = (async () => {
+        try {
+          const res = await fetch("/api/auth/refresh", {
+            method: "POST",
+            headers: {
+              "Authorization": "Bearer " + corpToken,
+              "X-Firebase-Token": corpToken
+            }
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data && data.token) {
+              window.localStorage.setItem("corporate_token", data.token);
+              if (data.email) window.localStorage.setItem("user_email", data.email);
+              window.localStorage.setItem("is_admin", data.is_admin ? "true" : "false");
+              if (data.full_name) window.localStorage.setItem("user_name", data.full_name);
+              return data.token;
+            }
+          } else if (res.status === 401 || res.status === 403) {
+            let errDetail = "Your authentication session has expired. Please sign in again.";
+            try {
+              const errJson = await res.json();
+              if (errJson && typeof errJson.detail === "string") errDetail = errJson.detail;
+            } catch (_) {}
+            handleSessionExpired(errDetail);
+            return null;
+          }
+        } catch (_) {
+          // Keep current locally-valid token on transient network issue
+        } finally {
+          _refreshInFlight = null;
+        }
+        return window.localStorage.getItem("corporate_token") || corpToken;
+      })();
+
+      return _refreshInFlight;
+    }
+
+    // Helper to get authentication token (Corporate Session Token preferred, Firebase ID Token fallback)
     async function getAuthToken() {
+      const corpToken = window.localStorage.getItem("corporate_token") || "";
+      if (corpToken) {
+        return corpToken;
+      }
       if (window._firebaseAuth && window._firebaseAuth.currentUser) {
         try {
           return await window._firebaseAuth.currentUser.getIdToken();
         } catch (_) {}
       }
-      return window.localStorage.getItem("corporate_token") || "";
+      return "";
     }
     window.getAuthToken = getAuthToken;
 
+    async function authorizedFetch(url, options = {}) {
+      let token = null;
+      const corpToken = window.localStorage.getItem("corporate_token") || "";
+      if (corpToken) {
+        token = await refreshCorporateSessionIfNeeded();
+        if (!token) return null;
+      } else {
+        token = await getAuthToken();
+        if (!token) {
+          handleSessionExpired("Please sign in to continue.");
+          return null;
+        }
+      }
+
+      const headers = new Headers(options.headers || {});
+      headers.set("Authorization", "Bearer " + token);
+      headers.set("X-Firebase-Token", token);
+
+      const response = await fetch(url, { ...options, headers });
+      if (response.status === 401) {
+        let detail = "Invalid or expired authentication session. Please sign in again.";
+        try {
+          const clone = response.clone();
+          const errJson = await clone.json();
+          if (errJson && typeof errJson.detail === "string") detail = errJson.detail;
+        } catch (_) {}
+        handleSessionExpired(detail);
+        return null;
+      }
+      return response;
+    }
+    window.authorizedFetch = authorizedFetch;
+
     function isAuthenticated() {
-      return !!((window._firebaseAuth && window._firebaseAuth.currentUser) || window.localStorage.getItem("corporate_token"));
+      const corpToken = window.localStorage.getItem("corporate_token");
+      if (corpToken) {
+        return isCorporateTokenValidLocally(corpToken);
+      }
+      return !!(window._firebaseAuth && window._firebaseAuth.currentUser);
     }
     window.isAuthenticated = isAuthenticated;
 
     function getCurrentUserEmail() {
-      return (window._firebaseAuth && window._firebaseAuth.currentUser && window._firebaseAuth.currentUser.email) || window.localStorage.getItem("user_email") || "";
+      return window.localStorage.getItem("user_email") || (window._firebaseAuth && window._firebaseAuth.currentUser && window._firebaseAuth.currentUser.email) || "";
     }
     window.getCurrentUserEmail = getCurrentUserEmail;
 
@@ -1895,17 +2084,30 @@
 
         const data = await res.json();
         if (res.ok && data.status === "SUCCESS") {
+          const previousEmail = (window.localStorage.getItem("last_login_email") || "").toLowerCase();
+          if (previousEmail && previousEmail !== (data.email || "").toLowerCase()) {
+            selectedFiles = [];
+            renderFileList();
+            const feed = document.getElementById("documentResultsFeed");
+            if (feed) feed.innerHTML = "";
+          }
           window.localStorage.setItem("corporate_token", data.token);
           window.localStorage.setItem("user_email", data.email);
+          window.localStorage.setItem("last_login_email", data.email);
           window.localStorage.setItem("user_name", data.full_name || data.username);
           window.localStorage.setItem("is_admin", data.is_admin ? "true" : "false");
 
+          if (pwdInput) pwdInput.value = "";
+          if (statusEl) {
+            statusEl.style.display = "none";
+            statusEl.innerHTML = "";
+          }
+          if (window._firebaseSignOut && window._firebaseAuth && window._firebaseAuth.currentUser) {
+            try { await window._firebaseSignOut(window._firebaseAuth); } catch (_) {}
+          }
+
           setAuthenticatedState(data.email, data.is_admin, data.full_name);
           showToast(`Welcome! Authenticated as ${data.full_name || data.email}`);
-
-          if (data.custom_token && window._firebaseSignInWithCustomToken && window._firebaseAuth) {
-            window._firebaseSignInWithCustomToken(window._firebaseAuth, data.custom_token).catch(() => {});
-          }
         } else {
           const detail = data.detail || "Authentication failed. Please verify credentials.";
           showToast(detail);
@@ -2174,9 +2376,10 @@
       // Restore persistent session on page load ONLY if not in password reset workflow
       const savedToken = window.localStorage.getItem("corporate_token");
       const savedEmail = window.localStorage.getItem("user_email");
-      if (savedToken && savedEmail) {
-        setAuthenticatedState(savedEmail, savedEmail === "aic1176@aurogroup.com");
-      } else {
+      const savedName = window.localStorage.getItem("user_name") || "";
+      const savedIsAdmin = window.localStorage.getItem("is_admin") === "true";
+
+      const showLoginScreen = () => {
         const userPill = document.getElementById("userPill");
         const portalNav = document.getElementById("portalNav");
         const loginCard = document.getElementById("loginCard");
@@ -2186,6 +2389,49 @@
         document.getElementById("viewUpload").style.display = "none";
         document.getElementById("viewHITL").style.display = "none";
         document.getElementById("viewMIS").style.display = "none";
+      };
+
+      if (savedToken && savedEmail) {
+        if (!isCorporateTokenValidLocally(savedToken)) {
+          showLoginScreen();
+          handleSessionExpired("Your previous session has expired. Please sign in again.", savedEmail);
+        } else {
+          // Verify cached session with backend before exposing portal UI
+          showLoginScreen();
+          (async () => {
+            try {
+              const meRes = await fetch("/api/auth/me", {
+                headers: {
+                  "Authorization": "Bearer " + savedToken,
+                  "X-Firebase-Token": savedToken
+                }
+              });
+              if (meRes.ok) {
+                const meData = await meRes.json();
+                const verifiedEmail = meData.email || savedEmail;
+                const verifiedAdmin = !!meData.is_admin;
+                const verifiedName = meData.full_name || savedName;
+                window.localStorage.setItem("user_email", verifiedEmail);
+                window.localStorage.setItem("last_login_email", verifiedEmail);
+                window.localStorage.setItem("is_admin", verifiedAdmin ? "true" : "false");
+                if (verifiedName) window.localStorage.setItem("user_name", verifiedName);
+                setAuthenticatedState(verifiedEmail, verifiedAdmin, verifiedName);
+              } else if (meRes.status === 401 || meRes.status === 403) {
+                handleSessionExpired("Your previous session has expired or is no longer valid. Please sign in again.", savedEmail);
+              } else {
+                setAuthenticatedState(savedEmail, savedIsAdmin || savedEmail === "aic1176@aurogroup.com", savedName);
+              }
+            } catch (_) {
+              if (isCorporateTokenValidLocally(savedToken)) {
+                setAuthenticatedState(savedEmail, savedIsAdmin || savedEmail === "aic1176@aurogroup.com", savedName);
+              } else {
+                handleSessionExpired("Your previous session has expired. Please sign in again.", savedEmail);
+              }
+            }
+          })();
+        }
+      } else {
+        showLoginScreen();
       }
     }
 
@@ -2202,6 +2448,7 @@
       }
       window.localStorage.removeItem("corporate_token");
       window.localStorage.removeItem("user_email");
+      window.localStorage.removeItem("last_login_email");
       window.localStorage.removeItem("user_name");
       window.localStorage.removeItem("is_admin");
       if (window._firebaseSignOut && window._firebaseAuth) {
@@ -2344,7 +2591,11 @@
     // SEQUENTIAL MULTI-DOCUMENT PROCESSOR
     // Processes ONE file at a time; starts the next strictly after the previous completes.
     window.submitBatchSequentially = async () => {
-      if (!selectedFiles.length || !isAuthenticated()) return;
+      if (!selectedFiles.length) return;
+      if (!isAuthenticated()) {
+        handleSessionExpired("Your authentication session has expired. Please sign in again to park invoices.");
+        return;
+      }
 
       const parkBtn = document.getElementById("parkBtn");
       const stepper = document.getElementById("progressStepper");
@@ -2381,21 +2632,24 @@
         const t4 = setTimeout(() => setStepState(4), 6000);
 
         try {
-          const idToken = await getAuthToken();
           const formData = new FormData();
           formData.append("file", f);
 
-          // Dedicated single-document endpoint
-          const response = await fetch("/api/park-invoice", {
+          // Dedicated single-document endpoint (handles proactive refresh and 401 re-auth cleanly)
+          const response = await authorizedFetch("/api/park-invoice", {
             method: "POST",
-            headers: {
-              "Authorization": "Bearer " + idToken,
-              "X-Firebase-Token": idToken
-            },
             body: formData
           });
 
           clearTimeout(t2); clearTimeout(t3); clearTimeout(t4);
+          if (!response) {
+            if (timerInterval) clearInterval(timerInterval);
+            stepper.style.display = "none";
+            parkBtn.disabled = false;
+            parkBtn.innerText = "Park Invoices in SAP (MIR7)";
+            renderFileList();
+            return;
+          }
           setStepState(5);
 
           let result;
@@ -3117,13 +3371,10 @@
       }
 
       try {
-        const idToken = await getAuthToken();
-        const res = await fetch(`/api/invoices/${traceId}/resolve-hitl`, {
+        const res = await authorizedFetch(`/api/invoices/${traceId}/resolve-hitl`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": "Bearer " + idToken,
-            "X-Firebase-Token": idToken,
           },
           body: JSON.stringify({
             corrections: {
@@ -3133,6 +3384,13 @@
             }
           })
         });
+        if (!res) {
+          if (btn) {
+            btn.disabled = false;
+            btn.innerText = "Validate & Resume Parking in SAP";
+          }
+          return;
+        }
 
         let updated;
         try {
@@ -3169,14 +3427,10 @@
         return;
       }
       try {
-        const idToken = await getAuthToken();
-        const res = await fetch(`/api/invoices/${traceId}/discard-irrelevant`, {
-          method: "POST",
-          headers: {
-            "Authorization": "Bearer " + idToken,
-            "X-Firebase-Token": idToken,
-          }
+        const res = await authorizedFetch(`/api/invoices/${traceId}/discard-irrelevant`, {
+          method: "POST"
         });
+        if (!res) return;
         const data = await res.json();
         if (res.ok) {
           showToast("Document confirmed irrelevant and discarded.");
@@ -3200,14 +3454,10 @@
         btn.innerText = "Dispatching via Power Automate...";
       }
       try {
-        const idToken = await getAuthToken();
-        const res = await fetch("/api/admin/trigger-monthly-mis", {
-          method: "POST",
-          headers: {
-            "Authorization": "Bearer " + idToken,
-            "X-Firebase-Token": idToken,
-          }
+        const res = await authorizedFetch("/api/admin/trigger-monthly-mis", {
+          method: "POST"
         });
+        if (!res) return;
         const data = await res.json();
         if (res.ok) {
           showToast(`Monthly MIS report successfully dispatched to ${data.recipient} via Power Automate.`);
@@ -3228,10 +3478,8 @@
     async function updateHITLBadge() {
       if (!isAuthenticated()) return;
       try {
-        const idToken = await getAuthToken();
-        const res = await fetch("/api/mis/hitl-queue", {
-          headers: { "Authorization": "Bearer " + idToken, "X-Firebase-Token": idToken }
-        });
+        const res = await authorizedFetch("/api/mis/hitl-queue");
+        if (!res || !res.ok) return;
         const data = await res.json();
         const badge = document.getElementById("hitlQueueBadge");
         if (badge) {
@@ -3247,11 +3495,10 @@
       container.innerHTML = `<div style="text-align:center; padding:30px; color:var(--slate-400);">Loading pending reviews...</div>`;
 
       try {
-        const idToken = await getAuthToken();
-        const res = await fetch("/api/mis/hitl-queue", {
-          headers: { "Authorization": "Bearer " + idToken, "X-Firebase-Token": idToken }
-        });
+        const res = await authorizedFetch("/api/mis/hitl-queue");
+        if (!res) return;
         const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
         const items = data.pending_invoices || [];
 
         if (!items.length) {
@@ -3280,15 +3527,16 @@
 
     // LOAD ADMIN MIS DASHBOARD & AUDIT TELEMETRY
     window.loadMISDashboard = async () => {
-      if (!isAuthenticated()) return;
+      if (!isAuthenticated()) {
+        handleSessionExpired("Your authentication session has expired. Please sign in again.");
+        return;
+      }
       try {
-        const idToken = await getAuthToken();
-
         // 1. Fetch Metrics
-        const mRes = await fetch("/api/mis/dashboard", {
-          headers: { "Authorization": "Bearer " + idToken, "X-Firebase-Token": idToken }
-        });
+        const mRes = await authorizedFetch("/api/mis/dashboard");
+        if (!mRes) return;
         const metrics = await mRes.json();
+        if (!mRes.ok) throw new Error(metrics.detail || `HTTP ${mRes.status}`);
 
         document.getElementById("kpiTotal").innerText = metrics.total_invoices || 0;
         document.getElementById("kpiParked").innerText = metrics.parked_success || 0;
@@ -3358,24 +3606,21 @@
         }
 
         // 2. Fetch Invoices Table
-        const iRes = await fetch(`/api/mis/invoices?status=${currentMISFilter}&limit=100`, {
-          headers: { "Authorization": "Bearer " + idToken, "X-Firebase-Token": idToken }
-        });
+        const iRes = await authorizedFetch(`/api/mis/invoices?status=${currentMISFilter}&limit=100`);
+        if (!iRes) return;
         const iData = await iRes.json();
         misInvoicesCache = iData.invoices || [];
         renderMISInvoicesTable(misInvoicesCache);
 
         // 3. Fetch Audit Logs
-        const aRes = await fetch("/api/mis/audit-logs?limit=50", {
-          headers: { "Authorization": "Bearer " + idToken, "X-Firebase-Token": idToken }
-        });
+        const aRes = await authorizedFetch("/api/mis/audit-logs?limit=50");
+        if (!aRes) return;
         const aData = await aRes.json();
         renderMISAuditLogs(aData.audit_logs || []);
 
         // 4. Fetch Incident Alerts Dispatched to aic1176@aurogroup.com
-        const alRes = await fetch("/api/mis/incident-alerts?limit=50", {
-          headers: { "Authorization": "Bearer " + idToken, "X-Firebase-Token": idToken }
-        });
+        const alRes = await authorizedFetch("/api/mis/incident-alerts?limit=50");
+        if (!alRes) return;
         const alData = await alRes.json();
         renderMISAlerts(alData.alerts || alData.incident_alerts || []);
 
@@ -3535,15 +3780,21 @@
     };
 
     window.sendTestFailureAlert = async () => {
-      if (!isAuthenticated()) return;
+      if (!isAuthenticated()) {
+        handleSessionExpired("Your authentication session has expired. Please sign in again.");
+        return;
+      }
       try {
         showToast("Dispatching test alert to aic1176@aurogroup.com via Power Automate Webhook...");
-        const idToken = await getAuthToken();
-        const res = await fetch("/api/alerts/test", {
-          method: "POST",
-          headers: { "Authorization": "Bearer " + idToken, "X-Firebase-Token": idToken }
+        const res = await authorizedFetch("/api/alerts/test", {
+          method: "POST"
         });
+        if (!res) return;
         const data = await res.json();
+        if (!res.ok) {
+          showToast(data.detail || "Failed to trigger alert.");
+          return;
+        }
         const st = data.email_status || data.incident?.email_status || data.status;
         showToast(`✅ Alert Delivered! Status: ${st}`);
         loadMISDashboard();
@@ -3653,7 +3904,19 @@
         }
 
         if (user) {
-          const email = (user.email || "").toLowerCase().trim();
+          // If an active valid corporate password session is already established, do not let background Firebase state clobber it
+          const activeCorpToken = window.localStorage.getItem("corporate_token");
+          if (activeCorpToken && isCorporateTokenValidLocally(activeCorpToken)) {
+            return;
+          }
+
+          let email = (user.email || "").toLowerCase().trim();
+          if (!email) {
+            try {
+              const tokenResult = await user.getIdTokenResult();
+              email = (tokenResult?.claims?.email || "").toLowerCase().trim();
+            } catch (_) {}
+          }
           const isAllowed = ALLOWED_EMAILS.includes(email) || ALLOWED_DOMAINS.some(d => email.endsWith("@" + d) || email.endsWith("." + d));
           if (!isAllowed) {
             await signOut(auth);
@@ -3664,11 +3927,20 @@
           let isAdmin = ["aic1176@aurogroup.com", "umamaheswara.g@ent.aurogroup.com", "mahender.r@tridentchemphar.com"].includes(email);
           try {
             const idToken = await user.getIdToken();
-            const meRes = await fetch("/api/auth/me", {
+            const sRes = await fetch("/api/auth/session-from-firebase", {
+              method: "POST",
               headers: { "Authorization": "Bearer " + idToken, "X-Firebase-Token": idToken }
             });
-            const meData = await meRes.json();
-            isAdmin = meData.is_admin || isAdmin;
+            if (sRes.ok) {
+              const sData = await sRes.json();
+              if (sData.token) {
+                window.localStorage.setItem("corporate_token", sData.token);
+                window.localStorage.setItem("user_email", sData.email || email);
+                window.localStorage.setItem("last_login_email", sData.email || email);
+                window.localStorage.setItem("is_admin", sData.is_admin ? "true" : "false");
+                isAdmin = !!sData.is_admin;
+              }
+            }
           } catch (_) {}
 
           setAuthenticatedState(email, isAdmin);
