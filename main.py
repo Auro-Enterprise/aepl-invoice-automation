@@ -51,11 +51,13 @@ MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB strict limit per enterprise spec
 ALLOWED_DOMAINS = {"aurogroup.com", "ent.aurogroup.com", "tridentchemphar.com"}
 
 # Enterprise System Administrators
-ADMIN_EMAILS = {
+_DEFAULT_ADMIN_EMAILS = {
     "aic1176@aurogroup.com",
     "umamaheswara.g@ent.aurogroup.com",
     "mahender.r@tridentchemphar.com",
 }
+_env_admins = {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").replace(",", ";").split(";") if e.strip()}
+ADMIN_EMAILS = _env_admins if _env_admins else _DEFAULT_ADMIN_EMAILS
 
 # Sorted List & Delimited String for Multi-Admin Notification Routing
 ADMIN_RECIPIENT_LIST = sorted(list(ADMIN_EMAILS))
@@ -160,8 +162,9 @@ def validate_file_magic_bytes(filename: str, content: bytes) -> bool:
 
 
 def is_admin_user(email: str) -> bool:
-    """Checks whether the specified email belongs strictly to the Administrator role (aic1176@aurogroup.com)."""
-    return (email or "").lower().strip() in ADMIN_EMAILS
+    """Checks whether the specified email belongs strictly to an authorized Administrator."""
+    clean = (email or "").lower().strip()
+    return clean in ADMIN_EMAILS or clean == "aic1176@aurogroup.com"
 
 
 # ---------------------------------------------------------
@@ -4294,7 +4297,7 @@ async def discard_irrelevant_invoice(
 
     is_admin = is_admin_user(user_email)
     submitted_by = (invoice.get("submitted_by") or "").strip().lower()
-    if not is_admin and submitted_by and submitted_by != user_email.lower():
+    if not is_admin and (not submitted_by or submitted_by != user_email.lower()):
         raise HTTPException(status_code=403, detail="Forbidden: You can only discard documents uploaded by your account.")
 
     invoice["status"] = "DISCARDED_IRRELEVANT"
@@ -4336,7 +4339,7 @@ async def get_invoice_cpi_response(
 
     is_admin = is_admin_user(user_email)
     submitted_by = (invoice.get("submitted_by") or "").strip().lower()
-    if not is_admin and submitted_by and submitted_by != user_email.lower():
+    if not is_admin and (not submitted_by or submitted_by != user_email.lower()):
         raise HTTPException(
             status_code=403,
             detail="Forbidden: Multi-user isolation policy restricts you to viewing SAP CPI responses for your own documents."
@@ -4371,20 +4374,27 @@ async def get_mis_dashboard(
     x_firebase_token: Optional[str] = Header(default=None),
 ):
     """
-    Returns executive KPI statistics and status counts with strict multi-user isolation.
-    - Standard users only see statistics for their own uploads.
-    - Administrator (aic1176@aurogroup.com) views organization-wide statistics.
+    Returns executive KPI statistics and status counts strictly for system administrators.
+    Enforces strict RBAC: Non-admin users receive 403 Forbidden.
     """
     user_email = verify_corporate_user(authorization, x_firebase_token)
-    is_admin = is_admin_user(user_email)
-    metrics = audit_service.get_mis_metrics(user_email=user_email, is_admin=is_admin)
+    if not is_admin_user(user_email):
+        audit_service.log_event(
+            event_type="UNAUTHORIZED_MIS_ACCESS_ATTEMPT",
+            user_email=user_email,
+            trace_id=None,
+            severity="WARNING",
+            message=f"Unauthorized access attempt to Admin MIS Dashboard by non-admin user '{user_email}'.",
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: Admin privileges required to access Admin MIS & Monitoring dashboard."
+        )
+
+    metrics = audit_service.get_mis_metrics(is_admin=True)
     all_incidents = alert_service.list_incidents()
-    if is_admin:
-        metrics["incident_alerts_count"] = len(all_incidents)
-        metrics["user_breakdown"] = audit_service.get_user_mis_breakdown(is_admin=True)
-    else:
-        metrics["incident_alerts_count"] = len([i for i in all_incidents if (i.get("user_email") or "").lower() == user_email.lower()])
-        metrics["user_breakdown"] = [u for u in audit_service.get_user_mis_breakdown(is_admin=False) if u.get("email") == user_email.lower()]
+    metrics["incident_alerts_count"] = len(all_incidents)
+    metrics["user_breakdown"] = audit_service.get_user_mis_breakdown(is_admin=True)
     return JSONResponse(content=metrics)
 
 
@@ -4397,17 +4407,22 @@ async def list_invoices_endpoint(
     x_firebase_token: Optional[str] = Header(default=None),
 ):
     """
-    Returns filterable invoices stored in Cloud Firestore.
-    Enforces strict tenant isolation: Standard users only receive their own submitted documents.
+    Returns filterable invoices stored in Cloud Firestore for the Admin MIS ledger.
+    Enforces strict RBAC: Non-admin users are strictly forbidden from accessing the organization ledger.
     """
     user_email = verify_corporate_user(authorization, x_firebase_token)
-    is_admin = is_admin_user(user_email)
+    if not is_admin_user(user_email):
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: Admin privileges required to inspect the organization invoice ledger."
+        )
+
     invoices = audit_service.list_invoices(
         status=status,
         search=search,
         limit=limit,
         user_email=user_email,
-        is_admin=is_admin,
+        is_admin=True,
     )
 
     sanitized = []
@@ -4458,11 +4473,16 @@ async def get_audit_logs(
 ):
     """
     Returns chronological audit events from Cloud Firestore (Mumbai asia-south1).
-    Standard users only see audit trail events associated with their activity.
+    Enforces strict RBAC: Only administrators can inspect enterprise audit logs.
     """
     user_email = verify_corporate_user(authorization, x_firebase_token)
-    is_admin = is_admin_user(user_email)
-    logs = audit_service.list_audit_logs(limit=limit, user_email=user_email, is_admin=is_admin)
+    if not is_admin_user(user_email):
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: Only administrators can inspect enterprise audit logs."
+        )
+
+    logs = audit_service.list_audit_logs(limit=limit, is_admin=True)
     return JSONResponse(content={"audit_logs": logs, "count": len(logs)})
 
 
@@ -4472,13 +4492,18 @@ async def get_incident_alerts(
     authorization: Optional[str] = Header(default=None),
     x_firebase_token: Optional[str] = Header(default=None),
 ):
-    """Returns automated failure incidents and notification dispatches to aic1176@aurogroup.com."""
+    """
+    Returns automated failure incidents and notification dispatches.
+    Enforces strict RBAC: Only administrators can view failure and security incident alerts.
+    """
     user_email = verify_corporate_user(authorization, x_firebase_token)
-    is_admin = is_admin_user(user_email)
-    incidents = alert_service.list_incidents(limit=limit)
-    if not is_admin:
-        incidents = [i for i in incidents if (i.get("user_email") or "").lower() == user_email.lower()]
+    if not is_admin_user(user_email):
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: Only administrators can view failure and security incident alerts."
+        )
 
+    incidents = alert_service.list_incidents(limit=limit)
     return JSONResponse(content={
         "recipient": alert_service.recipient_email,
         "alerts": incidents,

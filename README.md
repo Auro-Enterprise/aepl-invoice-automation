@@ -447,6 +447,7 @@ curl -X GET "https://sap-invoice-engine-411369932113.us-central1.run.app/api/inv
   -H "Authorization: Bearer <FIREBASE_ID_TOKEN>"
 ```
 * **Tenant Isolation**: Standard corporate users can only query CPI responses for documents they uploaded. Administrator (`aic1176@aurogroup.com`) can inspect responses across all tenant submissions.
+* **Strict Role-Based Access Control (RBAC)**: The Admin MIS & Monitoring dashboard (`/api/mis/dashboard`), organization invoice ledger (`/api/mis/invoices`), enterprise audit logs (`/api/mis/audit-logs`), and failure alerts (`/api/mis/incident-alerts`) are strictly restricted to designated administrators (`ADMIN_EMAILS`). Standard users (`role: user`, e.g. Accounts Payable Officers) have access exclusively to Invoice Ingestion (MIR7) and their own submitted invoices in the HITL review queue; all direct requests to administrative endpoints return HTTP 403 Forbidden.
 
 ---
 
