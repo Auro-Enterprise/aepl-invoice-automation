@@ -3296,6 +3296,10 @@
               <div class="field-card-val mono-val">${header.TCS != null ? `₹ ${parseFloat(header.TCS).toLocaleString('en-IN', {minimumFractionDigits:2})}` : "-"}</div>
             </div>
             <div class="field-card">
+              <div class="field-card-label">Reverse Charge (RCM)</div>
+              <div class="field-card-val mono-val">${header.RCM === true ? '<span style="color:#dc2626; font-weight:700;">Yes (Applicable)</span>' : '<span style="color:var(--slate-600);">No</span>'}</div>
+            </div>
+            <div class="field-card">
               <div class="field-card-label">Business Place</div>
               <div class="field-card-val mono-val">${header.BusinessPlace || "-"}</div>
             </div>
@@ -3499,6 +3503,10 @@
                 <div class="field-card">
                   <div class="field-card-label">Tax Collected at Source (TCS) 🔒</div>
                   <div class="field-card-val mono-val">${header.TCS != null ? `₹ ${parseFloat(header.TCS).toLocaleString('en-IN', {minimumFractionDigits:2})}` : "-"}</div>
+                </div>
+                <div class="field-card">
+                  <div class="field-card-label">Reverse Charge (RCM) 🔒</div>
+                  <div class="field-card-val mono-val">${header.RCM === true ? '<span style="color:#dc2626; font-weight:700;">Yes (Applicable)</span>' : '<span style="color:var(--slate-600);">No</span>'}</div>
                 </div>
                 <div class="field-card">
                   <div class="field-card-label">Business Place 🔒</div>
@@ -4037,6 +4045,7 @@
             <td class="mono-val" style="font-weight:600; text-align:right; font-size:11px; line-height:1.35;">
               ${gross}
               ${tcsStr ? `<br><span style="color:#059669; font-size:10px; font-weight:600;">TCS: ${tcsStr}</span>` : ''}
+              ${(h.RCM === true || inv.rcm === true) ? `<br><span style="color:#dc2626; font-size:10px; font-weight:700;">RCM: Yes</span>` : ''}
             </td>
             <td style="text-align:center;">${stPill}</td>
             <td class="mono-val" style="color:#0070f2; font-weight:700; font-size:11px; text-align:center;">${inv.sap_document_number || "-"}</td>

@@ -1596,6 +1596,7 @@ class ExtractionHeaderDataModel(BaseModel):
     TaxableVal: Optional[float] = Field(default=None, description="Overall total net taxable value on the invoice before GST")
     TCS: Optional[float] = Field(default=None, description="Tax Collected at Source amount if explicitly present on the invoice")
     TotalInvVal: Optional[float] = Field(default=None, description="Final grand total invoice amount inclusive of all taxes")
+    RCM: Optional[bool] = Field(default=False, description="Strict Boolean indicating whether Reverse Charge Mechanism is applicable (True if explicitly indicated, otherwise False)")
 
 
 class ExtractionInvoiceSchema(BaseModel):
@@ -1604,7 +1605,7 @@ class ExtractionInvoiceSchema(BaseModel):
 
 
 # OpenAPI 3.0 Constrained Decoding Schema for Gemini
-# Enforces that all 11 core HeaderData fields (including GRN and TCS) are strictly generated in output JSON
+# Enforces that all 12 core HeaderData fields (including GRN, TCS, and RCM) are strictly generated in output JSON
 GEMINI_EXTRACTION_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -1622,6 +1623,7 @@ GEMINI_EXTRACTION_SCHEMA = {
                 "TaxableVal": {"type": "NUMBER", "nullable": True, "description": "Total net taxable base value before taxes (e.g. 181392.00)."},
                 "TCS": {"type": "NUMBER", "nullable": True, "description": "Total monetary Tax Collected at Source (TCS / 'TCS on Sales') tax amount in INR (e.g. 4280.85). Do NOT return rate/percentage (do NOT return 2 or 0.02). Return 0.00 or null if absent."},
                 "TotalInvVal": {"type": "NUMBER", "nullable": True, "description": "Final grand total invoice value inclusive of all taxes, TCS, and round off (e.g. 218323.00)."},
+                "RCM": {"type": "BOOLEAN", "nullable": False, "description": "Strict Boolean indicating whether Reverse Charge Mechanism is applicable: True if explicitly indicated; otherwise False."},
             },
             "required": [
                 "RefDocNo",
@@ -1635,6 +1637,7 @@ GEMINI_EXTRACTION_SCHEMA = {
                 "TaxableVal",
                 "TCS",
                 "TotalInvVal",
+                "RCM",
             ],
         },
         "ItemData": {
@@ -1664,6 +1667,7 @@ def enforce_sap_abap_typing(obj, parent_key=""):
     """Forces standard ABAP DDIC types to prevent BAPI dumps (Notebook logic)."""
     numeric_fields = {"ItemQuantity", "ItemRate", "ItemAmount", "TaxableVal", "TCS", "TotalInvVal"}
     date_fields = {"DocDate"}
+    boolean_fields = {"RCM"}
 
     if isinstance(obj, list):
         return [enforce_sap_abap_typing(v, parent_key) for v in obj if v is not None]
@@ -1674,6 +1678,13 @@ def enforce_sap_abap_typing(obj, parent_key=""):
                 cleaned[k] = 0.00
             elif k in ("SES", "GRN") and (v is None or str(v).strip().lower() in ("", "null", "none")):
                 cleaned[k] = None
+            elif k in boolean_fields:
+                if isinstance(v, bool):
+                    cleaned[k] = v
+                elif isinstance(v, str):
+                    cleaned[k] = v.strip().lower() in ("true", "yes", "y", "1")
+                else:
+                    cleaned[k] = bool(v) if v is not None else False
             else:
                 cleaned[k] = enforce_sap_abap_typing(v, k)
 
@@ -1682,7 +1693,7 @@ def enforce_sap_abap_typing(obj, parent_key=""):
             all_header_fields = [
                 "DocDate", "RefDocNo", "PONumber", "SES", "GRN",
                 "CompName", "CompCode", "BusinessPlace",
-                "TaxableVal", "TCS", "TotalInvVal", "Attachment"
+                "TaxableVal", "TCS", "TotalInvVal", "RCM", "Attachment"
             ]
             for field in all_header_fields:
                 if field not in cleaned:
@@ -1690,6 +1701,8 @@ def enforce_sap_abap_typing(obj, parent_key=""):
                         cleaned[field] = None
                     elif field in numeric_fields:
                         cleaned[field] = 0.00
+                    elif field in boolean_fields:
+                        cleaned[field] = False
                     else:
                         cleaned[field] = ""
         return cleaned
@@ -1778,6 +1791,18 @@ def validate_sap_schema(payload_dict: dict) -> Tuple[bool, Optional[str], Option
                 return False, "ERR_TOTAL_VAL_ZERO", None
         except (ValueError, TypeError):
             return False, "ERR_TOTAL_VAL_ZERO", None
+
+    # 5. RCM Normalization: Ensure strictly boolean True or False
+    if "RCM" in header:
+        rcm_val = header.get("RCM")
+        if isinstance(rcm_val, bool):
+            header["RCM"] = rcm_val
+        elif isinstance(rcm_val, str):
+            header["RCM"] = rcm_val.strip().lower() in ("true", "yes", "y", "1")
+        else:
+            header["RCM"] = bool(rcm_val) if rcm_val is not None else False
+    else:
+        header["RCM"] = False
 
     return True, None, None
 
@@ -2160,6 +2185,7 @@ def submit_to_sap_cpi(
         tcs_val = header.get("TCS")
         taxable_val = header.get("TaxableVal")
         total_inv_val = header.get("TotalInvVal")
+        rcm_val = bool(header.get("RCM", False))
         comp_name = header.get("CompName") or "Auro Enterprises"
         biz_place = header.get("BusinessPlace") or "3601"
 
@@ -2176,6 +2202,7 @@ def submit_to_sap_cpi(
                 "TCS": tcs_val,
                 "TaxableVal": taxable_val,
                 "TotalInvVal": total_inv_val,
+                "RCM": rcm_val,
                 "CompName": comp_name,
                 "CompCode": comp_code,
                 "BusinessPlace": biz_place,
@@ -2213,6 +2240,7 @@ def submit_to_sap_cpi(
                 "TCS": tcs_val,
                 "TaxableVal": taxable_val,
                 "TotalInvVal": total_inv_val,
+                "RCM": rcm_val,
                 "CompName": comp_name,
                 "CompCode": comp_code,
                 "BusinessPlace": biz_place,
@@ -2248,6 +2276,7 @@ def submit_to_sap_cpi(
             "TCS": tcs_val,
             "TaxableVal": taxable_val,
             "TotalInvVal": total_inv_val,
+            "RCM": rcm_val,
             "CompName": comp_name,
             "CompCode": comp_code,
             "BusinessPlace": biz_place,
@@ -2442,6 +2471,7 @@ You are an expert Accounts Payable Data Extraction Agent for SAP S/4HANA (MIR7/M
     The line item "TCS on Sales (2%)" contributing 4,280.85 to the total MUST be extracted into HeaderData.TCS as 4280.85.
   * If no TCS row or label is present on the invoice, return null or 0.00.
 - TotalInvVal: The final grand total invoice amount inclusive of all taxes, duties, TCS, and round-offs (e.g., 218323.00).
+- RCM (CRITICAL): Identify whether Reverse Charge Mechanism is applicable by searching for labels or keywords such as "Reverse Charge", or "Reverse". Return a strict Boolean value only: True if explicitly indicated; otherwise, return False. Do not return strings, numbers, null, or any explanatory text.
 
 [ITEM DATA]
 - Array Extraction: Extract only genuine commercial line items (goods, services, materials, freight) into the ItemData array (e.g., SlNo: 1, ItemText: "COAL Coal", ItemQuantity: 37.790, ItemRate: 4800.00, ItemAmount: 181392.00).
@@ -2976,6 +3006,7 @@ async def process_single_invoice_document(
                 "comp_code": header.get("CompCode"),
                 "comp_name": header.get("CompName"),
                 "business_place": header.get("BusinessPlace"),
+                "rcm": header.get("RCM", False),
                 "extracted_data": payload_dict,
                 "sap_document_number": None,
                 "telemetry": telemetry,
@@ -3034,6 +3065,7 @@ async def process_single_invoice_document(
                 "comp_code": header.get("CompCode"),
                 "comp_name": header.get("CompName"),
                 "business_place": header.get("BusinessPlace"),
+                "rcm": header.get("RCM", False),
                 "extracted_data": payload_dict,
                 "sap_document_number": None,
                 "telemetry": telemetry,
@@ -3113,6 +3145,7 @@ async def process_single_invoice_document(
             "comp_code": header.get("CompCode"),
             "comp_name": header.get("CompName"),
             "business_place": header.get("BusinessPlace"),
+            "rcm": header.get("RCM", False),
             "cpi_status": "S",
             "sap_status": "S",
             "cpi_response": cpi_result.get("cpi_response", {}),
@@ -3174,6 +3207,7 @@ async def process_single_invoice_document(
                 "comp_code": header.get("CompCode"),
                 "comp_name": header.get("CompName"),
                 "business_place": header.get("BusinessPlace"),
+                "rcm": header.get("RCM", False),
                 "sap_message": sap_err_msg,
                 "extracted_data": payload_dict,
                 "sap_document_number": None,
@@ -3248,6 +3282,7 @@ async def process_single_invoice_document(
                 "comp_code": header.get("CompCode"),
                 "comp_name": header.get("CompName"),
                 "business_place": header.get("BusinessPlace"),
+                "rcm": header.get("RCM", False),
                 "cpi_response": cpi_result.get("cpi_response", {}),
                 "error_info": err_info,
                 "sap_document_number": None,

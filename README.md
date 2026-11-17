@@ -132,6 +132,7 @@ erDiagram
         float TaxableVal "Net taxable base value before GST"
         float TCS "Tax Collected at Source amount if applicable"
         float TotalInvVal "Final gross amount inclusive of all taxes"
+        boolean RCM "Reverse Charge Mechanism applicable flag (True/False)"
         string Attachment "Base64 encoded merged PDF stream"
     }
 
@@ -160,7 +161,7 @@ erDiagram
 * **Direct VPC Egress with Private Google Access**: Attached to VPC `vpc-aepl-inv-sec` and subnet `sub-aepl-us` (`10.20.1.0/24`) with `private-ranges-only`, keeping private SAP ERP communication isolated while communicating with Google APIs via Google's internal private backbone.
 * **Central Cloud Firestore Store (Mumbai `asia-south1`)**: Native persistence for invoice lifecycle (`invoices`), audit trail (`audit_logs`), auth events (`auth_events`), and failure incidents (`incident_alerts`) with sanitized attachment protection (< 1 MiB doc limit).
 * **Self-Service Human-in-the-Loop (HITL) with Comprehensive Value Visibility**:
-  * **Full Invoice Attribute & Line Item Parity**: The HITL interface displays all extracted values identically to the SAP parked success view—including the full 10-attribute header grid (`RefDocNo`, `DocDate`, `CompCode`, `CompName`, `Gross Value`, `Taxable Base`, `TCS`, `Business Place`, `SES`, `GRN`) and the complete multi-row Line Items table (`ItemData`), removing artificial tax estimates that confuse end-users.
+  * **Full Invoice Attribute & Line Item Parity**: The HITL interface displays all extracted values identically to the SAP parked success view—including the full 11-attribute header grid (`RefDocNo`, `DocDate`, `CompCode`, `CompName`, `Gross Value`, `Taxable Base`, `TCS`, `RCM`, `Business Place`, `SES`, `GRN`) and the complete multi-row Line Items table (`ItemData`), removing artificial tax estimates that confuse end-users.
   * **Strict Field Immutability (Read-Only Guardrails 🔒)**: All extracted invoice header attributes and line items are locked and strictly read-only to prevent tampering with financial figures or vendor data.
   * **Isolated PO, SES & GRN Editable Fields**: Only the Purchase Order (`PONumber`, mandatory 10-digit `^\d{10}$`), Service Entry Sheet (`SES`, optional 10-digit `^1\d{9}$`), and Goods Receipt Note (`GRN`, optional 10-digit `^5\d{9}$`) fields are editable in the HITL review form. All financial attributes including `TCS` remain strictly locked.
   * **SAP Rejection Finality (Status 'E')**: When SAP CPI rejects a document (response status `'E'`), the rejection is final. The **'Validate & Resume Parking in SAP'** button is permanently disabled in the UI, accompanied by an explicit rejection advisory banner, and the backend `/api/invoices/{trace_id}/resolve-hitl` API strictly rejects resume attempts with HTTP 400.
@@ -251,7 +252,8 @@ Expected JSON Response:
       "BusinessPlace": "2701",
       "TaxableVal": 125000.00,
       "TCS": 0.00,
-      "TotalInvVal": 147500.00
+      "TotalInvVal": 147500.00,
+      "RCM": false
     },
     "ItemData": [
       {
