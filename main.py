@@ -2102,6 +2102,15 @@ def verify_with_model_armor(text_to_screen: str, filename: str = "", trace_id: s
         # Fail closed if running in production or if a custom Model Armor template is configured
         if os.getenv("K_SERVICE") or (ARMOR_TEMPLATE_PATH and not ARMOR_TEMPLATE_PATH.endswith("templates/default-template")):
             detail = f"Security screening service exception: {exc}"
+            alert_service.send_failure_alert(
+                failure_type="MODEL_ARMOR_SERVICE_EXCEPTION",
+                filename=filename,
+                trace_id=trace_id,
+                user_email=user_email,
+                error_title="Model Armor Screening Service Exception",
+                error_detail=detail,
+                metadata={"exception": str(exc), "template": ARMOR_TEMPLATE_PATH},
+            )
             return True, detail
         return False, ""
 
