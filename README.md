@@ -387,6 +387,23 @@ Expected JSON Response:
 | `ALLOWED_EMAIL_DOMAINS` | String | `aurogroup.com;ent.aurogroup.com;tridentchemphar.com` | Semicolon-delimited authorized corporate domains. |
 | `ALLOWED_EMAILS` | String | *(Whitelisted corporate users)* | Semicolon-delimited authorized employee email addresses. |
 
+### Predefined Corporate Users & Roles
+
+The system directory recognizes authorized employees across corporate enterprise domains:
+
+| Employee ID | Full Name | Corporate Email | Domain | Role | Allowed Login Identifiers | Default Password |
+| :---: | :--- | :--- | :--- | :---: | :--- | :---: |
+| `AIC1176` | AEPL Administrator | `aic1176@aurogroup.com` | `aurogroup.com` | **ADMIN** | `aic1176`, `aic1176@aurogroup.com`, `AIC1176` | `AuroAdmin@2026!` |
+| `80000036` | Umamaheswara Rao | `umamaheswara.g@ent.aurogroup.com` | `ent.aurogroup.com` | **ADMIN** | `80000036`, `umamaheswara.g`, `umamaheswara.g@ent.aurogroup.com` | `AuroAdmin@2026!` |
+| `90000022` | Mahendra Reddy | `mahender.r@tridentchemphar.com` | `tridentchemphar.com` | **ADMIN** | `90000022`, `mahender.r`, `mahender.r@tridentchemphar.com` | `AuroAdmin@2026!` |
+| `80000037` | Naga venkata Thrimurthy Bhamidipati | `thrimurthy.b@ent.aurogroup.com` | `ent.aurogroup.com` | **USER** | `80000037`, `thrimurthy.b`, `thrimurthy.b@ent.aurogroup.com` | `AuroUser@2026!` |
+| `80000038` | Someswara Rao Konatham | `someswara.k@ent.aurogroup.com` | `ent.aurogroup.com` | **USER** | `80000038`, `someswara.k`, `someswara.k@ent.aurogroup.com` | `AuroUser@2026!` |
+| `80000074` | Pulla Reddy Yenumala | `pullareddy.y@ent.aurogroup.com` | `ent.aurogroup.com` | **USER** | `80000074`, `pullareddy.y`, `pullareddy.y@ent.aurogroup.com` | `AuroUser@2026!` |
+| `80000062` | Praveena Guntuku | `praveena.g@ent.aurogroup.com` | `ent.aurogroup.com` | **USER** | `80000062`, `praveena.g`, `praveena.g@ent.aurogroup.com` | `AuroUser@2026!` |
+
+> [!NOTE]
+> All corporate user credentials are authenticated via constant-time PBKDF2-HMAC-SHA512 salted hashes (600,000 iterations). Plaintext passwords are not stored in source code. Users may update their passwords at any time via the self-service **Forgot Password** workflow.
+
 ### Automated Failure Alerts (Official Firebase Extension: `firestore-send-email`)
 
 The application integrates natively with the official Firebase Extension: [Trigger Email from Firestore (`firestore-send-email`)](https://firebase.google.com/docs/extensions/official/firestore-send-email).
