@@ -2097,6 +2097,7 @@ def verify_with_model_armor(text_to_screen: str, filename: str = "", trace_id: s
                 metadata={"sanitization_result": str(res.sanitization_result)},
             )
             return True, detail
+        return False, ""
     except Exception as exc:
         logger.warning(f"Model Armor screening notice: {exc}")
         # Fail closed if running in production or if a custom Model Armor template is configured
