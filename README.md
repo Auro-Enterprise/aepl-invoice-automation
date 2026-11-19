@@ -182,6 +182,91 @@ erDiagram
 
 ---
 
+## Enterprise Security & Guardrails (23-Point Security Audit Remediation)
+
+Following a comprehensive zero-trust security audit across the entire application stack, the engine incorporates 23 verified enterprise security defenses covering identity, session management, ingestion integrity, AI screening, and SAP S/4HANA ERP guardrails:
+
+```mermaid
+flowchart TD
+    subgraph IngestionSec["1. Ingestion & Pre-Processing"]
+        A1["Dual Magic-Byte + .pdf Extension Check"]
+        A2["10-File Batch Limit Enforcement"]
+        A3["25MP Image Bomb Decompression Ceiling"]
+    end
+
+    subgraph AuthSec["2. Authentication & Zero-Trust Sessions"]
+        B1["Mandatory Production SESSION_SECRET (Runtime Fast-Fail)"]
+        B2["Zero Plaintext Passwords / Seed Hash Elimination"]
+        B3["Per-Identifier & IP Partitioned Rate Limiting"]
+        B4["Strict Idle & Lifetime Timeout (Edge Browser Auto-Login Fix)"]
+        B5["Firebase inMemoryPersistence (No Credential Survivals)"]
+        B6["Password Reset Redirect Origin Domain Whitelisting"]
+        B7["Authenticated Audit Event Ingestion"]
+    end
+
+    subgraph AISec["3. Model & AI Security"]
+        C1["Model Armor Fail-Closed Quarantine Protection"]
+        C2["Mathematical TCS Balance Equation Verification"]
+    end
+
+    subgraph SAPHITLSec["4. SAP ERP & HITL Boundary Protection"]
+        D1["Direct VPC Egress (vpc-aepl-inv-sec / sub-aepl-us)"]
+        D2["DefusedXML ElementTree XXE Defense"]
+        D3["Strict RefDocNo & Line Item ABAP DDIC Schema Rule"]
+        D4["Unbounded Invoice Deduplication Query (No 50-Doc Truncation)"]
+        D5["SAP_REJECTED Finality Persistence (Blocks Re-Submission)"]
+        D6["Production Mock Simulation Block (Fails Closed 503)"]
+        D7["HITL Submitter Tenant Boundary Isolation"]
+        D8["Irrelevant Document Parking Prevention"]
+        D9["Synthetic Dummy Document Injection Elimination"]
+    end
+
+    subgraph UICloudSec["5. Portal & Cloud Communications"]
+        E1["DOM & Stored XSS Elimination (Context-Aware HTML Escaping)"]
+        E2["Hardened CSP Directives (unsafe-inline Removed)"]
+        E3["Brevo Cloud Function Recipient Domain Whitelist"]
+        E4["Alert Email HTML Template Variable Escaping"]
+    end
+```
+
+### Detailed 23-Point Remediation Matrix
+
+| Category | Finding Fingerprint | Severity | Mitigation Applied |
+| :--- | :--- | :--- | :--- |
+| **AI Screening** | `AI_MODEL_ARMOR_FAIL_OPEN` | High | Replaced fail-open exception handling with fail-closed quarantine routing (`HITL_REQUIRED`) when Model Armor evaluation fails. |
+| **Financial Logic** | `AI_TCS_RECONCILIATION_TAUTOLOGY_FLAW` | Medium | Replaced tautological condition (`0.0 < 2.0`) with exact mathematical balance equation: `abs(candidate_amt - (total_gross - taxable_base)) < 2.0`. |
+| **Alert Notifications** | `ALERT_HTML_INJECTION_EMAIL` | Medium | Applied `html.escape` to all user-controllable alert email variables (`incident_id`, `filename`, `trace_id`, `error_detail`). |
+| **Email Relay** | `ALERT_UNAUTHENTICATED_EMAIL_RELAY` | High | Restricted Cloud Function email dispatch to whitelisted enterprise domains (`@aurogroup.com`, `@ent.aurogroup.com`, `@tridentchemphar.com`). |
+| **Session Security** | `AUTH_HARDCODED_SESSION_SECRET` | Critical | Fails fast with `RuntimeError` in production if `SESSION_SECRET` is unset; generates cryptographically secure ephemeral 256-bit token in local dev. |
+| **Credential Management** | `AUTH_PREDEFINED_CREDENTIALS_EXPOSURE` | Critical | Completely purged plaintext default passwords from source; in-memory fallback hashes removed so unseeded offline instances fail closed. |
+| **Access Control** | `AUTH_RATE_LIMIT_PARTITIONED_AND_DOS` | High | Partitioned failed login counters by both username and client IP (`{identifier}@{client_ip}`), blocking unauthenticated denial-of-service. |
+| **Account Recovery** | `AUTH_RESET_REDIRECT_ORIGIN_INJECTION` | Critical | Validated client-supplied `redirect_origin` against approved enterprise origins, stopping password reset token interception. |
+| **Audit Integrity** | `AUTH_UNAUTHENTICATED_AUDIT_LOGGING` | High | Required valid corporate bearer token authentication on `/api/auth/record-login`, preventing forged authentication logs. |
+| **Infrastructure** | `CLOUD_RUN_VPC_DISCONNECTION` | Major | Replaced `--clear-network` in CI/CD with enterprise Direct VPC egress (`vpc-aepl-inv-sec`, subnet `sub-aepl-us`, `private-ranges-only`). |
+| **Web Security** | `CSP_UNSAFE_INLINE_SCRIPT_SRC` | Medium | Removed `'unsafe-inline'` from `default-src` in Content-Security-Policy headers. |
+| **Tenant Isolation** | `HITL_IRRELEVANT_DOC_PARK_BYPASS` | High | Excluded `IRRELEVANT_DOC_PENDING` from resolvable statuses, preventing non-company invoices from being parked in SAP. |
+| **Document Compliance** | `HITL_SYNTHETIC_ATTACHMENT_INJECTION` | Medium | Removed synthetic dummy PDF generator fallback (`%AEPL HITL Synthesized Document`); raises HTTP 422 if genuine attachment is missing. |
+| **Multi-Tenancy** | `HITL_TENANT_BOUNDARY_BYPASS` | High | Fixed inverted tenant check: non-admin callers strictly restricted to resolving documents matching their verified submitter email. |
+| **Ingestion** | `INGESTION_BATCH_RATE_LIMIT_BYPASS` | Medium | Imposed strict 10-file maximum cap on batch document upload requests to prevent rate limit evasion. |
+| **File Validation** | `INGESTION_MAGIC_BYTE_BYPASS` | Medium | Mandated both `.pdf` file extension and `%PDF-` magic header bytes via boolean `and` validation. |
+| **Resource Protection** | `INGESTION_MEM_HANDLING` | High | Enforced Pillow `Image.MAX_IMAGE_PIXELS = 25_000_000` to prevent decompression bomb memory exhaustion. |
+| **ERP Concurrency** | `SAP_DEDUPLICATION_TOCTOU_RACE` | High | Removed 50-record truncation and indexed `ref_doc_no` directly across all active and in-flight invoice records. |
+| **ERP Integrity** | `SAP_MOCK_FALLBACK_PRODUCTION_DRIFT` | High | Disabled simulated SAP document numbers in production when CPI credentials are absent; raises HTTP 503 instead of generating phantom invoices. |
+| **Guardrails** | `SAP_REJECTION_FINALITY_BYPASS` | Medium | Added `SAP_REJECTED` status to deduplication indexing, preventing re-upload and re-submission of rejected invoices. |
+| **Schema Validation** | `SAP_VALIDATION_SCHEMA_RULE` | Medium | Added mandatory validation for vendor invoice reference number (`RefDocNo`) in `validate_sap_schema`. |
+| **XML Security** | `SAP_XML_PARSER_XXE_RISK` | Medium | Adopted `defusedxml.ElementTree` for parsing SAP CPI XML responses, mitigating XML entity expansion attacks. |
+| **Frontend Security** | `XSS_UNESCAPED_INNERHTML_INVOICE_FEED` | High | Sanitized dynamic DOM rendering with `escapeHtml()` across invoice tables, MIS ledgers, and audit logs. |
+
+### Edge Browser Multi-Day Auto-Login Elimination
+Microsoft Edge users previously remained logged into the portal across days or weeks due to browser session restoration and unvalidated local state. This has been resolved through:
+1. **Strict Activity Expiration (`isSessionIdleExpired`)**: Missing or uninitialized `last_activity_at` timestamps now immediately evaluate to expired (`true`), forcing re-authentication.
+2. **Zero-Trust Backend Session Verification**: Purged `allowOfflineRestore` logic; sessions require active verification against `/api/auth/me`. Expired or invalid sessions immediately trigger full credential teardown.
+3. **In-Memory Firebase Persistence**: Initialized Firebase Auth with `inMemoryPersistence` (`Auth.Persistence.NONE`), preventing credentials from persisting in IndexedDB across browser restarts.
+
+---
+
+---
+
 ## Getting Started
 
 ### Prerequisites
@@ -463,7 +548,7 @@ Configured in Cloud Run via `--set-secrets`:
 | `SAP_CPI_URI:1` | `SAP_CPI_URI` | Inbound SAP CPI HTTP endpoint (`ZMM_VENDORINV_PARK_AUTOMATE`). |
 | `ALERT_WEBHOOK_URL:latest` | `ALERT_WEBHOOK_URL` | Microsoft Power Automate HTTP trigger webhook URL (including secure SAS signature). |
 | `FIREBASE_WEB_API_KEY:latest` | `FIREBASE_WEB_API_KEY` | Firebase Web Client SDK API key for Single Sign-On and email-link authentication. |
-| `SESSION_SECRET:latest` | `SESSION_SECRET` | 64+ char cryptographic key used for signing corporate user session tokens (HMAC-SHA256). |
+| `SESSION_SECRET:latest` | `SESSION_SECRET` | 64+ char cryptographic key used for signing corporate user session tokens (HMAC-SHA256). Strictly required in production (fails fast at runtime if missing). |
 
 ---
 
@@ -473,11 +558,11 @@ Configured in Cloud Run via `--set-secrets`:
 aepl-invoice-automation/
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml            # Keyless CI/CD pipeline deploying to Cloud Run via WIF v2
+│       └── deploy.yml            # Keyless CI/CD pipeline deploying to Cloud Run via WIF v2 (Direct VPC egress)
 ├── AEPL_Invoice_Parking_Automation_Using_Google_ADK.ipynb  # Reference architectural notebook
 ├── Dockerfile                    # Hardened Python 3.11-slim container with non-root aepluser
 ├── index.html                    # Universal responsive SAP Fiori Horizon AP web portal
 ├── main.py                       # Core FastAPI service, Model Armor client, and SAP BAPI dispatcher
 ├── README.md                     # Technical architecture, setup, and deployment manual
-└── requirements.txt              # Pinned production dependencies (FastAPI, GenAI, Model Armor, PyMuPDF)
+└── requirements.txt              # Pinned production dependencies (FastAPI, GenAI, Model Armor, PyMuPDF, defusedxml)
 ```

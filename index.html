@@ -1985,7 +1985,8 @@
       const store = getSessionStore();
       if (!store) return false;
       const raw = store.getItem("last_activity_at");
-      if (raw === null || raw === undefined || raw === "") return false;
+      // Security fix: If last_activity_at timestamp is absent, session must be treated as expired
+      if (raw === null || raw === undefined || raw === "") return true;
       const lastActivity = Number(raw);
       if (!Number.isFinite(lastActivity) || lastActivity <= 0) return true;
       return (nowMs - lastActivity) >= SESSION_IDLE_TIMEOUT_MS;
@@ -2630,27 +2631,15 @@
             return false;
           }
 
-          if (!isCorporateTokenValidLocally(token) || isSessionIdleExpired()) {
-            handleSessionExpired("Your previous session has expired. Please sign in again.", savedEmail);
-            return false;
-          }
-          if (allowOfflineRestore && !isPortalUiVisible() && savedEmail) {
-            setAuthenticatedState(savedEmail, savedIsAdmin || savedEmail === "aic1176@aurogroup.com", savedName);
-          }
-          return true;
+          handleSessionExpired("Unable to verify active corporate session with server. Please sign in again.", savedEmail);
+          return false;
         } catch (_) {
           const currentToken = store ? (store.getItem("corporate_token") || "") : "";
           if (currentToken !== token) {
             return false;
           }
-          if (!isCorporateTokenValidLocally(token) || isSessionIdleExpired()) {
-            handleSessionExpired("Your previous session has expired. Please sign in again.", savedEmail);
-            return false;
-          }
-          if (allowOfflineRestore && !isPortalUiVisible() && savedEmail) {
-            setAuthenticatedState(savedEmail, savedIsAdmin || savedEmail === "aic1176@aurogroup.com", savedName);
-          }
-          return true;
+          handleSessionExpired("Unable to verify active corporate session with server. Please sign in again.", savedEmail);
+          return false;
         } finally {
           _verifyInFlight = null;
         }
@@ -3250,9 +3239,9 @@
         items.forEach((it, idx) => {
           rowsHtml += `
             <tr>
-              <td class="mono-val">${it.SlNo || (idx + 1) * 10}</td>
-              <td>${it.ItemText || "Item"}</td>
-              <td class="mono-val">${header.SES || "-"}</td>
+              <td class="mono-val">${escapeHtml(it.SlNo || (idx + 1) * 10)}</td>
+              <td>${escapeHtml(it.ItemText || "Item")}</td>
+              <td class="mono-val">${escapeHtml(header.SES || "-")}</td>
               <td class="mono-val"><strong>${it.ItemQuantity || 0}</strong></td>
               <td class="mono-val">₹ ${(it.ItemRate || 0).toLocaleString('en-IN', {minimumFractionDigits:2})}</td>
               <td class="mono-val" style="text-align:right;"><strong>₹ ${(it.ItemAmount || 0).toLocaleString('en-IN', {minimumFractionDigits:2})}</strong></td>
@@ -3452,9 +3441,9 @@
         items.forEach((it, idx) => {
           rowsHtml += `
             <tr>
-              <td class="mono-val">${it.SlNo || (idx + 1) * 10}</td>
-              <td>${it.ItemText || "Item"}</td>
-              <td class="mono-val">${header.SES || "-"}</td>
+              <td class="mono-val">${escapeHtml(it.SlNo || (idx + 1) * 10)}</td>
+              <td>${escapeHtml(it.ItemText || "Item")}</td>
+              <td class="mono-val">${escapeHtml(header.SES || "-")}</td>
               <td class="mono-val"><strong>${it.ItemQuantity || 0}</strong></td>
               <td class="mono-val">₹ ${(it.ItemRate || 0).toLocaleString('en-IN', {minimumFractionDigits:2})}</td>
               <td class="mono-val" style="text-align:right;"><strong>₹ ${(it.ItemAmount || 0).toLocaleString('en-IN', {minimumFractionDigits:2})}</strong></td>
@@ -4071,14 +4060,14 @@
 
         html += `
           <tr>
-            <td class="mono-val" style="font-size:11px; white-space:nowrap;"><strong>${inv.trace_id}</strong><br><span style="color:var(--slate-400); font-size:10px;">${dateStr}</span></td>
-            <td style="max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${inv.filename || ''}"><strong>${inv.filename || "doc"}</strong></td>
-            <td style="font-size:11px; color:var(--slate-600); word-break:break-all;">${inv.submitted_by || "User"}</td>
-            <td style="font-size:11px; line-height:1.3;"><strong>${h.RefDocNo || inv.ref_doc_no || "-"}</strong><br><span style="color:var(--slate-500); font-size:10px; display:inline-block; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${h.CompName || inv.comp_name || ''}">${h.CompName || inv.comp_name || ""}</span></td>
+            <td class="mono-val" style="font-size:11px; white-space:nowrap;"><strong>${escapeHtml(inv.trace_id)}</strong><br><span style="color:var(--slate-400); font-size:10px;">${escapeHtml(dateStr)}</span></td>
+            <td style="max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(inv.filename || '')}"><strong>${escapeHtml(inv.filename || "doc")}</strong></td>
+            <td style="font-size:11px; color:var(--slate-600); word-break:break-all;">${escapeHtml(inv.submitted_by || "User")}</td>
+            <td style="font-size:11px; line-height:1.3;"><strong>${escapeHtml(h.RefDocNo || inv.ref_doc_no || "-")}</strong><br><span style="color:var(--slate-500); font-size:10px; display:inline-block; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(h.CompName || inv.comp_name || '')}">${escapeHtml(h.CompName || inv.comp_name || "")}</span></td>
             <td class="mono-val" style="font-size:11px; line-height:1.35;">
-              <strong>${poVal}</strong>
-              ${sesVal ? `<br><span style="color:var(--slate-500); font-size:10px;">SES: ${sesVal}</span>` : ''}
-              ${grnVal ? `<br><span style="color:#0284c7; font-size:10px; font-weight:600;">GRN: ${grnVal}</span>` : ''}
+              <strong>${escapeHtml(poVal)}</strong>
+              ${sesVal ? `<br><span style="color:var(--slate-500); font-size:10px;">SES: ${escapeHtml(sesVal)}</span>` : ''}
+              ${grnVal ? `<br><span style="color:#0284c7; font-size:10px; font-weight:600;">GRN: ${escapeHtml(grnVal)}</span>` : ''}
             </td>
             <td class="mono-val" style="font-weight:600; text-align:right; font-size:11px; line-height:1.35;">
               ${gross}
@@ -4086,12 +4075,12 @@
               ${(h.RCM === true || inv.rcm === true) ? `<br><span style="color:#dc2626; font-size:10px; font-weight:700;">RCM: Yes</span>` : ''}
             </td>
             <td style="text-align:center;">${stPill}</td>
-            <td class="mono-val" style="color:#0070f2; font-weight:700; font-size:11px; text-align:center;">${inv.sap_document_number || "-"}</td>
+            <td class="mono-val" style="color:#0070f2; font-weight:700; font-size:11px; text-align:center;">${escapeHtml(inv.sap_document_number || "-")}</td>
             <td style="text-align:center;">
               ${(inv.status === "HITL_REQUIRED" || inv.status === "SAP_REJECTED") ? `
                 <button class="btn-warning" onclick="switchTab('hitl')" style="padding:3px 7px; font-size:10px;">Resolve</button>
               ` : `
-                <button class="btn-secondary" onclick="exportJSON('${inv.trace_id}')" style="padding:3px 7px; font-size:10px;">JSON</button>
+                <button class="btn-secondary" onclick="exportJSON('${escapeHtml(inv.trace_id)}')" style="padding:3px 7px; font-size:10px;">JSON</button>
               `}
             </td>
           </tr>
@@ -4116,12 +4105,12 @@
 
         html += `
           <tr>
-            <td class="mono-val" style="font-size:11px; white-space:nowrap;">${timeStr}</td>
-            <td style="font-size:11px; font-weight:600;">${l.event_type}</td>
-            <td style="font-size:11px; word-break:break-all;">${l.user_email || "System"}</td>
-            <td class="mono-val" style="font-size:11px;">${l.trace_id || "-"}</td>
-            <td style="text-align:center;"><span style="color:${sevColor}; font-weight:700; font-size:10px;">${l.severity}</span></td>
-            <td style="font-size:11px; color:var(--slate-700); word-break:break-word; line-height:1.35;">${l.message}</td>
+            <td class="mono-val" style="font-size:11px; white-space:nowrap;">${escapeHtml(timeStr)}</td>
+            <td style="font-size:11px; font-weight:600;">${escapeHtml(l.event_type)}</td>
+            <td style="font-size:11px; word-break:break-all;">${escapeHtml(l.user_email || "System")}</td>
+            <td class="mono-val" style="font-size:11px;">${escapeHtml(l.trace_id || "-")}</td>
+            <td style="text-align:center;"><span style="color:${sevColor}; font-weight:700; font-size:10px;">${escapeHtml(l.severity)}</span></td>
+            <td style="font-size:11px; color:var(--slate-700); word-break:break-word; line-height:1.35;">${escapeHtml(l.message)}</td>
           </tr>
         `;
       });

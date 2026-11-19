@@ -1,5 +1,6 @@
 # Goldfish Annotated Review Report
 
+**Status:** `RESOLVED (Auto-Accepted and Applied)`  
 **Target:** `aepl-invoice-automation` (`main.py`, `index.html`, `functions/index.js`, `.github/workflows/deploy.yml`) (`full codebase`)
 
 ## Executive Summary & Status

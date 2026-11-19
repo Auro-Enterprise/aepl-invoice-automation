@@ -4,6 +4,7 @@ import contextvars
 import copy
 import hashlib
 import hmac
+import html
 import io
 import json
 import logging
@@ -16,7 +17,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote
-import xml.etree.ElementTree as ET
+try:
+    import defusedxml.ElementTree as ET
+except ImportError:
+    import xml.etree.ElementTree as ET
 
 import firebase_admin
 from firebase_admin import auth as firebase_auth, firestore as fb_firestore
@@ -125,7 +129,7 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
     response.headers["Content-Security-Policy"] = (
-        "default-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com https://fonts.gstatic.com data:; "
+        "default-src 'self' https://cdn.jsdelivr.net https://fonts.googleapis.com https://fonts.gstatic.com data:; "
         "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://www.gstatic.com; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; "
         "font-src 'self' https://fonts.gstatic.com data:; "
@@ -150,7 +154,7 @@ def validate_file_magic_bytes(filename: str, content: bytes) -> bool:
     if not content:
         return False
     fn = filename.lower()
-    if fn.endswith(".pdf") or content.startswith(b"%PDF"):
+    if fn.endswith(".pdf"):
         return content.startswith(b"%PDF-")
     if fn.endswith((".jpg", ".jpeg")):
         return content.startswith(b"\xff\xd8\xff")
@@ -193,7 +197,7 @@ def verify_password(password: str, hashed_str: str) -> bool:
         return False
 
 
-# Whitelisted Predefined Corporate Users (Default seed credentials)
+# Whitelisted Predefined Corporate Users (Identity directory only - No hardcoded passwords)
 PREDEFINED_USERS = {
     "aic1176": {
         "username": "aic1176",
@@ -201,7 +205,6 @@ PREDEFINED_USERS = {
         "email": "aic1176@aurogroup.com",
         "role": "admin",
         "full_name": "AEPL Administrator",
-        "default_pwd": "AuroAdmin@2026!",
     },
     "umamaheswara.g": {
         "username": "umamaheswara.g",
@@ -209,7 +212,6 @@ PREDEFINED_USERS = {
         "email": "umamaheswara.g@ent.aurogroup.com",
         "role": "admin",
         "full_name": "Umamaheswara Rao",
-        "default_pwd": "AuroAdmin@2026!",
     },
     "mahender.r": {
         "username": "mahender.r",
@@ -217,7 +219,6 @@ PREDEFINED_USERS = {
         "email": "mahender.r@tridentchemphar.com",
         "role": "admin",
         "full_name": "Mahendra Reddy",
-        "default_pwd": "AuroAdmin@2026!",
     },
     "thrimurthy.b": {
         "username": "thrimurthy.b",
@@ -225,7 +226,6 @@ PREDEFINED_USERS = {
         "email": "thrimurthy.b@ent.aurogroup.com",
         "role": "user",
         "full_name": "Naga venkata Thrimurthy Bhamidipati",
-        "default_pwd": "AuroUser@2026!",
     },
     "someswara.k": {
         "username": "someswara.k",
@@ -233,7 +233,6 @@ PREDEFINED_USERS = {
         "email": "someswara.k@ent.aurogroup.com",
         "role": "user",
         "full_name": "Someswara Rao Konatham",
-        "default_pwd": "AuroUser@2026!",
     },
     "pullareddy.y": {
         "username": "pullareddy.y",
@@ -241,7 +240,6 @@ PREDEFINED_USERS = {
         "email": "pullareddy.y@ent.aurogroup.com",
         "role": "user",
         "full_name": "Pulla Reddy Yenumala",
-        "default_pwd": "AuroUser@2026!",
     },
     "praveena.g": {
         "username": "praveena.g",
@@ -249,7 +247,6 @@ PREDEFINED_USERS = {
         "email": "praveena.g@ent.aurogroup.com",
         "role": "user",
         "full_name": "Praveena Guntuku",
-        "default_pwd": "AuroUser@2026!",
     },
 }
 
@@ -261,7 +258,7 @@ for uname, udata in PREDEFINED_USERS.items():
         "email": udata["email"].lower(),
         "role": udata["role"],
         "full_name": udata["full_name"],
-        "password_hash": hash_password(udata["default_pwd"]),
+        "password_hash": "",  # Passwords must be established via Firestore / bootstrap
         "status": "ACTIVE",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -280,12 +277,12 @@ _RESET_REQUESTS: Dict[str, List[float]] = {}
 
 def check_rate_limit_and_lockout(identifier: str, client_ip: str) -> Optional[str]:
     now = time.time()
-    for key in (identifier.lower(), client_ip):
+    for key in (f"{identifier.lower()}@{client_ip}", client_ip):
         if key in _LOCKED_ACCOUNTS:
             locked_until = _LOCKED_ACCOUNTS[key]
             if now < locked_until:
                 remaining_mins = max(1, int((locked_until - now) / 60))
-                return f"Account / IP locked due to multiple failed login attempts. Retry in {remaining_mins} minutes or request password reset."
+                return f"Authentication temporarily locked due to multiple failed attempts from this IP. Retry in {remaining_mins} minutes or request password reset."
             else:
                 del _LOCKED_ACCOUNTS[key]
     return None
@@ -293,7 +290,7 @@ def check_rate_limit_and_lockout(identifier: str, client_ip: str) -> Optional[st
 
 def record_failed_login(identifier: str, client_ip: str):
     now = time.time()
-    for key in (identifier.lower(), client_ip):
+    for key in (f"{identifier.lower()}@{client_ip}", client_ip):
         attempts = _LOGIN_ATTEMPTS.setdefault(key, [])
         attempts = [t for t in attempts if now - t < 900]
         attempts.append(now)
@@ -303,15 +300,15 @@ def record_failed_login(identifier: str, client_ip: str):
             alert_service.send_failure_alert(
                 failure_type="SECURITY_ACCOUNT_LOCKOUT",
                 filename="authentication_gateway",
-                trace_id=f"lock_{key[:8]}",
+                trace_id=f"lock_{hashlib.sha256(key.encode()).hexdigest()[:8]}",
                 user_email=identifier,
-                error_title=f"Security Lockout: 5 Failed Attempts for '{key}'",
+                error_title=f"Security Lockout: 5 Failed Attempts for '{identifier}' from IP {client_ip}",
                 error_detail=f"IP {client_ip} has been temporarily locked out for 30 minutes after 5 consecutive failed authentications.",
             )
 
 
 def reset_login_attempts(identifier: str, client_ip: str):
-    for key in (identifier.lower(), client_ip):
+    for key in (f"{identifier.lower()}@{client_ip}", client_ip):
         _LOGIN_ATTEMPTS.pop(key, None)
         _LOCKED_ACCOUNTS.pop(key, None)
 
@@ -530,6 +527,15 @@ class AlertNotificationService:
             f"Action Required: Inspect Admin MIS Dashboard as {self.recipient_email}."
         )
 
+        safe_incident_id = html.escape(str(incident_id))
+        safe_failure_type = html.escape(str(failure_type))
+        safe_filename = html.escape(str(filename or "document"))
+        safe_trace_id = html.escape(str(trace_id or "-"))
+        safe_user_email = html.escape(str(user_email or "-"))
+        safe_now_iso = html.escape(str(now_iso))
+        safe_error_title = html.escape(str(error_title))
+        safe_error_detail = html.escape(str(error_detail))
+
         html_body = f"""
         <html>
         <body style="font-family: Arial, sans-serif; color: #1e293b; line-height: 1.5; padding: 20px;">
@@ -539,17 +545,17 @@ class AlertNotificationService:
             <div style="padding: 20px; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 6px 6px; background-color: #fafbfc;">
                 <p style="font-size: 14px; margin-top: 0;">An automated invoice processing exception has occurred requiring administrative attention.</p>
                 <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 13px;">
-                    <tr><td style="padding: 6px 0; font-weight: bold; width: 160px;">Incident ID:</td><td>{incident_id}</td></tr>
-                    <tr><td style="padding: 6px 0; font-weight: bold;">Failure Type:</td><td style="color: #b91c1c; font-weight: bold;">{failure_type}</td></tr>
-                    <tr><td style="padding: 6px 0; font-weight: bold;">Document File:</td><td>{filename}</td></tr>
-                    <tr><td style="padding: 6px 0; font-weight: bold;">Trace ID:</td><td><code>{trace_id}</code></td></tr>
-                    <tr><td style="padding: 6px 0; font-weight: bold;">Submitted By:</td><td>{user_email}</td></tr>
-                    <tr><td style="padding: 6px 0; font-weight: bold;">Timestamp (UTC):</td><td>{now_iso}</td></tr>
+                    <tr><td style="padding: 6px 0; font-weight: bold; width: 160px;">Incident ID:</td><td>{safe_incident_id}</td></tr>
+                    <tr><td style="padding: 6px 0; font-weight: bold;">Failure Type:</td><td style="color: #b91c1c; font-weight: bold;">{safe_failure_type}</td></tr>
+                    <tr><td style="padding: 6px 0; font-weight: bold;">Document File:</td><td>{safe_filename}</td></tr>
+                    <tr><td style="padding: 6px 0; font-weight: bold;">Trace ID:</td><td><code>{safe_trace_id}</code></td></tr>
+                    <tr><td style="padding: 6px 0; font-weight: bold;">Submitted By:</td><td>{safe_user_email}</td></tr>
+                    <tr><td style="padding: 6px 0; font-weight: bold;">Timestamp (UTC):</td><td>{safe_now_iso}</td></tr>
                     {meta_html}
-                    <tr><td style="padding: 6px 0; font-weight: bold; vertical-align: top;">Error Summary:</td><td><strong>{error_title}</strong><br><span style="color: #64748b;">{error_detail}</span></td></tr>
+                    <tr><td style="padding: 6px 0; font-weight: bold; vertical-align: top;">Error Summary:</td><td><strong>{safe_error_title}</strong><br><span style="color: #64748b;">{safe_error_detail}</span></td></tr>
                 </table>
                 <div style="margin-top: 20px; padding: 12px; background-color: #fee2e2; border-left: 4px solid #b91c1c; font-size: 13px;">
-                    <strong>Action Required:</strong> Log in to the Admin MIS Dashboard as <code>{self.recipient_email}</code> to inspect telemetry or review in Human-in-the-Loop queue.
+                    <strong>Action Required:</strong> Log in to the Admin MIS Dashboard as <code>{html.escape(self.recipient_email)}</code> to inspect telemetry or review in Human-in-the-Loop queue.
                 </div>
             </div>
         </body>
@@ -1274,28 +1280,43 @@ class FirestoreAuditService:
         return self._invoices_mem.get(trace_id)
 
     def find_duplicate_invoice(self, ref_doc_no: str, comp_code: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Checks whether an invoice with the same RefDocNo has already been parked successfully."""
+        """Checks whether an invoice with the same RefDocNo has already been parked, is currently in flight, or was rejected."""
         if not ref_doc_no:
             return None
 
         clean_ref = str(ref_doc_no).strip().upper()
+        active_statuses = {"PARKED_SUCCESS", "PARK_IN_PROGRESS", "SUBMITTED_TO_SAP", "SAP_REJECTED"}
 
+        # 1. Search in-memory store across active, in-flight, and rejected statuses
         for inv in self._invoices_mem.values():
-            if inv.get("status") == "PARKED_SUCCESS":
+            if inv.get("status") in active_statuses:
                 h = inv.get("extracted_data", {}).get("HeaderData", {})
-                if str(h.get("RefDocNo", "")).strip().upper() == clean_ref:
-                    if not comp_code or str(h.get("CompCode", "")).strip() == str(comp_code).strip():
+                inv_ref = str(inv.get("ref_doc_no") or h.get("RefDocNo", "")).strip().upper()
+                if inv_ref == clean_ref:
+                    inv_comp = str(inv.get("comp_code") or h.get("CompCode", "")).strip()
+                    if not comp_code or inv_comp == str(comp_code).strip():
                         return inv
 
+        # 2. Query Firestore directly by ref_doc_no without 50-item truncation limit
         if self.db:
             try:
-                query = self.db.collection("invoices").where("status", "==", "PARKED_SUCCESS").limit(50)
-                docs = query.stream()
-                for doc in docs:
+                # Query indexed ref_doc_no field directly
+                query = self.db.collection("invoices").where("ref_doc_no", "==", clean_ref)
+                if comp_code:
+                    query = query.where("comp_code", "==", str(comp_code).strip())
+                for doc in query.stream():
                     data = doc.to_dict()
-                    h = data.get("extracted_data", {}).get("HeaderData", {})
-                    if str(h.get("RefDocNo", "")).strip().upper() == clean_ref:
-                        if not comp_code or str(h.get("CompCode", "")).strip() == str(comp_code).strip():
+                    if data.get("status") in active_statuses:
+                        return data
+
+                # Fallback: query by extracted_data.HeaderData.RefDocNo
+                sub_query = self.db.collection("invoices").where("extracted_data.HeaderData.RefDocNo", "==", clean_ref)
+                for doc in sub_query.stream():
+                    data = doc.to_dict()
+                    if data.get("status") in active_statuses:
+                        h = data.get("extracted_data", {}).get("HeaderData", {})
+                        inv_comp = str(data.get("comp_code") or h.get("CompCode", "")).strip()
+                        if not comp_code or inv_comp == str(comp_code).strip():
                             return data
             except Exception as e:
                 logger.warning(f"Firestore duplicate search error: {e}")
@@ -1747,8 +1768,13 @@ def validate_sap_schema(payload_dict: dict) -> Tuple[bool, Optional[str], Option
     taxable_val = header.get("TaxableVal")
     tcs_val = header.get("TCS")
     total_inv_val = header.get("TotalInvVal")
+    ref_doc_no = header.get("RefDocNo")
 
-    # 1. Missing or Invalid PO Number per notebook regex (PO is Mandatory)
+    # 1. Missing Vendor Invoice Reference (RefDocNo / XBLNR is mandatory for SAP MIR7)
+    if not ref_doc_no or str(ref_doc_no).strip().lower() in ("null", "none", ""):
+        return False, "ERR_MISSING_REF_DOC", None
+
+    # 2. Missing or Invalid PO Number per notebook regex (PO is Mandatory)
     if not po_number or str(po_number).strip().lower() in ("null", "none", ""):
         return False, "ERR_MISSING_PO", None
 
@@ -1824,7 +1850,13 @@ def _get_env_int(name: str, default: int) -> int:
         return default
 
 
-SESSION_SECRET = os.getenv("SESSION_SECRET") or "aepl-invoice-secure-session-secret-2026-key"
+SESSION_SECRET = os.getenv("SESSION_SECRET")
+if not SESSION_SECRET or SESSION_SECRET == "aepl-invoice-secure-session-secret-2026-key":
+    if os.getenv("K_SERVICE"):
+        logger.error("CRITICAL SECURITY ALERT: SESSION_SECRET is not configured or uses insecure fallback in Cloud Run!")
+        raise RuntimeError("SESSION_SECRET environment variable is mandatory in production.")
+    logger.warning("SECURITY WARNING: Using ephemeral random 256-bit SESSION_SECRET for local execution.")
+    SESSION_SECRET = secrets.token_hex(32)
 SESSION_MAX_AGE_SECONDS = _get_env_int("SESSION_MAX_AGE_SECONDS", 28800)  # 8 hours absolute max lifetime from auth_time
 SESSION_IDLE_TIMEOUT_SECONDS = _get_env_int("SESSION_IDLE_TIMEOUT_SECONDS", 7200)  # 2 hours idle timeout
 _REVOKED_TOKENS: Set[str] = set()
@@ -2033,12 +2065,20 @@ def verify_with_model_armor(text_to_screen: str, filename: str = "", trace_id: s
             return True, detail
     except Exception as exc:
         logger.warning(f"Model Armor screening notice: {exc}")
-    return False, ""
+        # Fail closed if running in production or if a custom Model Armor template is configured
+        if os.getenv("K_SERVICE") or (ARMOR_TEMPLATE_PATH and not ARMOR_TEMPLATE_PATH.endswith("templates/default-template")):
+            detail = f"Security screening service exception: {exc}"
+            return True, detail
+        return False, ""
 
 
 # ---------------------------------------------------------
 # 8. MULTIMODAL MEDIA PROCESSING (PDF & Images)
 # ---------------------------------------------------------
+# Hardened decompression bomb protection (CHECK 04 & 06)
+Image.MAX_IMAGE_PIXELS = 25_000_000
+
+
 def optimize_image_768px(image_bytes: bytes) -> bytes:
     """The 768px FinOps Rule: Resizes image to 768x768 to lock token cost to 258 tokens/page."""
     with Image.open(io.BytesIO(image_bytes)) as img:
@@ -2176,6 +2216,17 @@ def submit_to_sap_cpi(
     final_payload = {"Request_VendorInvoice_Park_AEPL": enforce_sap_abap_typing(payload_dict)}
 
     if not all([SAP_TOKEN_URL, SAP_CLIENT_ID, SAP_CLIENT_SECRET, SAP_CPI_URI]):
+        if os.getenv("K_SERVICE") or os.getenv("ENV", "production").lower() not in ("dev", "development", "local"):
+            logger.error(f"Invoice {trace_id}: SAP CPI credentials missing in production environment.")
+            err_msg = "SAP CPI integration credentials not configured in production environment."
+            audit_service.save_cpi_response(trace_id, {"Status": "E", "Message": err_msg}, raw_text="", source="PRODUCTION_CONFIG_ERROR")
+            return {
+                "status": "FAILED",
+                "cpi_status": "E",
+                "cpi_message": err_msg,
+                "sap_document_number": None,
+                "cpi_response": {"Status": "E", "Message": err_msg},
+            }
         time.sleep(1.0)
         telemetry["cpi_time"] = 1.0
         telemetry["sap_time"] = 0.5
@@ -2777,7 +2828,7 @@ async def process_single_invoice_document(
             if 0.0 < current_tcs <= 5.0 and total_gross > taxable_base > 0:
                 rate_pct = current_tcs if current_tcs >= 0.05 else (current_tcs * 100)
                 candidate_amt = round((total_gross / (1.0 + (rate_pct / 100.0))) * (rate_pct / 100.0), 2)
-                if abs(candidate_amt - (total_gross - (total_gross - candidate_amt))) < 2.0:
+                if candidate_amt > 0 and abs(candidate_amt - (total_gross - taxable_base)) < 2.0:
                     header["TCS"] = candidate_amt
                     logger.info(f"Corrected TCS from rate ({current_tcs}) to calculated monetary amount ({header['TCS']}).")
 
@@ -3484,9 +3535,22 @@ async def forgot_password(payload: ForgotPasswordRequest, request: Request):
         audit_service.record_auth_event(identifier, "LOCKED", f"Reset rate limit: {rate_err}", client_ip=client_ip)
         raise HTTPException(status_code=429, detail=rate_err)
 
-    redirect_origin = (payload.redirect_origin or "").strip()
-    if not redirect_origin:
-        redirect_origin = str(request.base_url).rstrip("/")
+    ALLOWED_RESET_ORIGINS = {
+        "https://prj-aepl-ai-inv-auto-dev.web.app",
+        "https://prj-aepl-ai-inv-auto-dev.firebaseapp.com",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    }
+    raw_origin = (payload.redirect_origin or "").strip().rstrip("/")
+    base_origin = str(request.base_url).rstrip("/")
+    if raw_origin in ALLOWED_RESET_ORIGINS:
+        redirect_origin = raw_origin
+    elif base_origin in ALLOWED_RESET_ORIGINS:
+        redirect_origin = base_origin
+    else:
+        redirect_origin = "https://prj-aepl-ai-inv-auto-dev.web.app"
 
     user = audit_service.get_user(identifier)
     if user:
@@ -3700,7 +3764,10 @@ async def record_login(
     x_firebase_token: Optional[str] = Header(default=None),
 ):
     """Logs passwordless sign-in events (success/failure) directly into Cloud Firestore."""
+    auth_email = verify_corporate_user(authorization, x_firebase_token)
     user_email = (payload.get("email") or "").strip().lower()
+    if not user_email or user_email != auth_email:
+        user_email = auth_email
     status = payload.get("status", "SUCCESS")
     reason = payload.get("reason", "Passwordless Email Link Authentication")
     client_ip = payload.get("client_ip", "Unknown")
@@ -3816,6 +3883,8 @@ async def park_invoices_batch(
 
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded.")
+    if len(files) > 10:
+        raise HTTPException(status_code=400, detail="Batch limit exceeded: Maximum 10 documents can be uploaded in a single batch.")
 
     results = []
     batch_seen_hashes: Dict[str, str] = {}
@@ -3978,18 +4047,19 @@ async def resolve_hitl_invoice(
     # 1. RBAC Isolation Check
     is_admin = is_admin_user(user_email)
     submitted_by = (invoice.get("submitted_by") or "").strip().lower()
-    if not is_admin and submitted_by and submitted_by != user_email.lower():
-        audit_service.log_event(
-            event_type="RBAC_ACCESS_DENIED",
-            user_email=user_email,
-            trace_id=trace_id,
-            severity="WARNING",
-            message=f"RBAC violation: User {user_email} attempted to resolve invoice owned by {submitted_by}.",
-        )
-        raise HTTPException(
-            status_code=403,
-            detail="Forbidden: Multi-user isolation policy restricts you to resolving invoices uploaded by your account."
-        )
+    if not is_admin:
+        if not submitted_by or submitted_by != user_email.lower():
+            audit_service.log_event(
+                event_type="RBAC_ACCESS_DENIED",
+                user_email=user_email,
+                trace_id=trace_id,
+                severity="WARNING",
+                message=f"RBAC violation: User {user_email} attempted to resolve invoice owned by '{submitted_by}'.",
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: Multi-user isolation policy restricts you to resolving invoices uploaded by your account."
+            )
 
     # 2. SAP Rejection Finality Guardrail: Rejection (Status 'E') is final and cannot be resumed
     if invoice.get("status") == "SAP_REJECTED" or invoice.get("cpi_status") == "E" or invoice.get("sap_status") == "E":
@@ -4005,7 +4075,7 @@ async def resolve_hitl_invoice(
             detail="Cannot resume parking: SAP rejection is final (SAP CPI response 'E'). This document cannot be re-parked in SAP. A corrected invoice or resolution within SAP S/4HANA is required."
         )
 
-    if invoice.get("status") not in ("HITL_REQUIRED", "VALIDATION_FAILED", "IRRELEVANT_DOC_PENDING"):
+    if invoice.get("status") not in ("HITL_REQUIRED", "VALIDATION_FAILED"):
         raise HTTPException(
             status_code=400,
             detail=f"Invoice is currently in status '{invoice.get('status')}' and does not require intervention."
@@ -4082,7 +4152,10 @@ async def resolve_hitl_invoice(
         if mem_att and not str(mem_att).startswith("<Base64"):
             header["Attachment"] = mem_att
     if not header.get("Attachment") or str(header.get("Attachment")).startswith("<Base64"):
-        header["Attachment"] = base64.b64encode(b"%PDF-1.4\n%AEPL HITL Synthesized Document").decode("utf-8")
+        raise HTTPException(
+            status_code=422,
+            detail="Original document attachment could not be recovered across multi-instance memory. Please re-upload invoice document."
+        )
 
     # Execute SAP CPI BAPI
     telemetry = invoice.get("telemetry", {})

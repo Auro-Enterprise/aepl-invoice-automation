@@ -21,7 +21,17 @@ exports.sendFailureEmail = onDocumentCreated(
     if (!snap) return;
 
     const mailData = snap.data();
-    const recipient = (mailData.to && mailData.to[0]) || "aic1176@aurogroup.com";
+    let recipient = (mailData.to && mailData.to[0]) || "aic1176@aurogroup.com";
+    
+    // Security Guard: Prevent open email relay by strictly validating recipient domain
+    const ALLOWED_EMAIL_DOMAINS = ["@aurogroup.com", "@ent.aurogroup.com", "@tridentchemphar.com"];
+    const recipientLower = String(recipient).toLowerCase().trim();
+    const isDomainAllowed = ALLOWED_EMAIL_DOMAINS.some(domain => recipientLower.endsWith(domain));
+    if (!isDomainAllowed) {
+      logger.warn(`Untrusted email recipient '${recipient}' blocked from external relay. Rerouting to corporate administrator.`);
+      recipient = "aic1176@aurogroup.com";
+    }
+
     const sender = mailData.from || process.env.ALERT_SENDER_EMAIL || recipient;
     const subject = mailData.message?.subject || "[SAP AP FAILURE ALERT] Automated Notification";
     const htmlBody = mailData.message?.html || mailData.message?.text || "<p>Failure incident occurred.</p>";
