@@ -182,9 +182,9 @@ erDiagram
 
 ---
 
-## Enterprise Security & Guardrails (23-Point Security Audit Remediation)
+## Enterprise Security & Guardrails (24-Point Comprehensive Remediation)
 
-Following a comprehensive zero-trust security audit across the entire application stack, the engine incorporates 23 verified enterprise security defenses covering identity, session management, ingestion integrity, AI screening, and SAP S/4HANA ERP guardrails:
+Following a comprehensive zero-trust security audit across the entire application stack, the engine incorporates 24 verified enterprise security defenses covering identity, session management, ingestion integrity, AI screening, and SAP S/4HANA ERP guardrails (plus enterprise RBAC governance):
 
 ```mermaid
 flowchart TD
@@ -226,44 +226,45 @@ flowchart TD
         E2["Hardened CSP Directives (unsafe-inline Removed)"]
         E3["Brevo Cloud Function Recipient Domain Whitelist"]
         E4["Alert Email HTML Template Variable Escaping"]
+        E5["Strict Enterprise RBAC (Admin MIS Tab & API Gating)"]
     end
 ```
 
-### Detailed 23-Point Remediation Matrix
+### Complete 24-Issue Remediation & Verification Ledger
 
-| Category | Finding Fingerprint | Severity | Mitigation Applied |
-| :--- | :--- | :--- | :--- |
-| **AI Screening** | `AI_MODEL_ARMOR_FAIL_OPEN` | High | Replaced fail-open exception handling with fail-closed quarantine routing (`HITL_REQUIRED`) when Model Armor evaluation fails. |
-| **Financial Logic** | `AI_TCS_RECONCILIATION_TAUTOLOGY_FLAW` | Medium | Replaced tautological condition (`0.0 < 2.0`) with exact mathematical balance equation: `abs(candidate_amt - (total_gross - taxable_base)) < 2.0`. |
-| **Alert Notifications** | `ALERT_HTML_INJECTION_EMAIL` | Medium | Applied `html.escape` to all user-controllable alert email variables (`incident_id`, `filename`, `trace_id`, `error_detail`). |
-| **Email Relay** | `ALERT_UNAUTHENTICATED_EMAIL_RELAY` | High | Restricted Cloud Function email dispatch to whitelisted enterprise domains (`@aurogroup.com`, `@ent.aurogroup.com`, `@tridentchemphar.com`). |
-| **Session Security** | `AUTH_HARDCODED_SESSION_SECRET` | Critical | Fails fast with `RuntimeError` in production if `SESSION_SECRET` is unset; generates cryptographically secure ephemeral 256-bit token in local dev. |
-| **Credential Management** | `AUTH_PREDEFINED_CREDENTIALS_EXPOSURE` | Critical | Completely purged plaintext default passwords from source; in-memory fallback hashes removed so unseeded offline instances fail closed. |
-| **Access Control** | `AUTH_RATE_LIMIT_PARTITIONED_AND_DOS` | High | Partitioned failed login counters by both username and client IP (`{identifier}@{client_ip}`), blocking unauthenticated denial-of-service. |
-| **Account Recovery** | `AUTH_RESET_REDIRECT_ORIGIN_INJECTION` | Critical | Validated client-supplied `redirect_origin` against approved enterprise origins, stopping password reset token interception. |
-| **Audit Integrity** | `AUTH_UNAUTHENTICATED_AUDIT_LOGGING` | High | Required valid corporate bearer token authentication on `/api/auth/record-login`, preventing forged authentication logs. |
-| **Infrastructure** | `CLOUD_RUN_VPC_DISCONNECTION` | Major | Replaced `--clear-network` in CI/CD with enterprise Direct VPC egress (`vpc-aepl-inv-sec`, subnet `sub-aepl-us`, `private-ranges-only`). |
-| **Web Security** | `CSP_UNSAFE_INLINE_SCRIPT_SRC` | Medium | Removed `'unsafe-inline'` from `default-src` in Content-Security-Policy headers. |
-| **Tenant Isolation** | `HITL_IRRELEVANT_DOC_PARK_BYPASS` | High | Excluded `IRRELEVANT_DOC_PENDING` from resolvable statuses, preventing non-company invoices from being parked in SAP. |
-| **Document Compliance** | `HITL_SYNTHETIC_ATTACHMENT_INJECTION` | Medium | Removed synthetic dummy PDF generator fallback (`%AEPL HITL Synthesized Document`); raises HTTP 422 if genuine attachment is missing. |
-| **Multi-Tenancy** | `HITL_TENANT_BOUNDARY_BYPASS` | High | Fixed inverted tenant check: non-admin callers strictly restricted to resolving documents matching their verified submitter email. |
-| **Ingestion** | `INGESTION_BATCH_RATE_LIMIT_BYPASS` | Medium | Imposed strict 10-file maximum cap on batch document upload requests to prevent rate limit evasion. |
-| **File Validation** | `INGESTION_MAGIC_BYTE_BYPASS` | Medium | Mandated both `.pdf` file extension and `%PDF-` magic header bytes via boolean `and` validation. |
-| **Resource Protection** | `INGESTION_MEM_HANDLING` | High | Enforced Pillow `Image.MAX_IMAGE_PIXELS = 25_000_000` to prevent decompression bomb memory exhaustion. |
-| **ERP Concurrency** | `SAP_DEDUPLICATION_TOCTOU_RACE` | High | Removed 50-record truncation and indexed `ref_doc_no` directly across all active and in-flight invoice records. |
-| **ERP Integrity** | `SAP_MOCK_FALLBACK_PRODUCTION_DRIFT` | High | Disabled simulated SAP document numbers in production when CPI credentials are absent; raises HTTP 503 instead of generating phantom invoices. |
-| **Guardrails** | `SAP_REJECTION_FINALITY_BYPASS` | Medium | Added `SAP_REJECTED` status to deduplication indexing, preventing re-upload and re-submission of rejected invoices. |
-| **Schema Validation** | `SAP_VALIDATION_SCHEMA_RULE` | Medium | Added mandatory validation for vendor invoice reference number (`RefDocNo`) in `validate_sap_schema`. |
-| **XML Security** | `SAP_XML_PARSER_XXE_RISK` | Medium | Adopted `defusedxml.ElementTree` for parsing SAP CPI XML responses, mitigating XML entity expansion attacks. |
-| **Frontend Security** | `XSS_UNESCAPED_INNERHTML_INVOICE_FEED` | High | Sanitized dynamic DOM rendering with `escapeHtml()` across invoice tables, MIS ledgers, and audit logs. |
+| # | Finding Identifier | Severity | Affected Component | Mitigation Applied & Verified |
+| :---: | :--- | :---: | :--- | :--- |
+| **1** | `CLOUD_RUN_VPC_DISCONNECTION` | Major | [.github/workflows/deploy.yml](.github/workflows/deploy.yml#L37-L40) | Replaced `--clear-network` in CI/CD with enterprise Direct VPC egress flags (`--network=vpc-aepl-inv-sec --subnet=sub-aepl-us --vpc-egress=private-ranges-only`). |
+| **2** | `AUTH_PREDEFINED_CREDENTIALS_EXPOSURE` | Blocker | [main.py](main.py#L196-L272) | Completely removed default plaintext passwords from `PREDEFINED_USERS` and neutralized fallback password hashes to empty strings to fail closed. |
+| **3** | `AUTH_HARDCODED_SESSION_SECRET` | Blocker | [main.py](main.py#L1853-L1860) | Raised fatal `RuntimeError` if `SESSION_SECRET` is unset/default in Cloud Run production; generates ephemeral cryptographically secure 256-bit token in local dev. |
+| **4** | `AUTH_RESET_REDIRECT_ORIGIN_INJECTION` | Blocker | [main.py](main.py#L3538-L3555) | Whitelisted client `redirect_origin` against approved enterprise domains, stopping password reset token interception and account takeover. |
+| **5** | `EDGE_BROWSER_AUTO_LOGIN_SESSION_TIMEOUT` | Major | [index.html](index.html#L1984-L1994, #L2634-L2645, #L4265-L4270) | Eliminated Edge persistent auto-login: missing `last_activity_at` evaluates to expired (`true`), removed offline restore bypass, and enforced `inMemoryPersistence` for Firebase Auth. |
+| **6** | `AI_MODEL_ARMOR_FAIL_OPEN` | Major | [main.py](main.py#L2066-L2072) | Replaced fail-open exception handling with fail-closed quarantine routing (`HITL_REQUIRED`) when Model Armor screening fails in production. |
+| **7** | `HITL_TENANT_BOUNDARY_BYPASS` | Major | [main.py](main.py#L4047-L4065) | Replaced inverted tenant check with strict fail-closed check: non-admin callers strictly restricted to resolving documents matching their verified submitter email. |
+| **8** | `HITL_IRRELEVANT_DOC_PARK_BYPASS` | Major | [main.py](main.py#L4077-L4085) | Removed `IRRELEVANT_DOC_PENDING` from resolvable statuses in `resolve_hitl_invoice`, preventing non-company invoices from being parked in SAP. |
+| **9** | `SAP_DEDUPLICATION_TOCTOU_RACE` | Major | [main.py](main.py#L1282-L1315) | Removed 50-record truncation (`.limit(50)`) and indexed `ref_doc_no` directly across all active and in-flight invoice records in Firestore. |
+| **10** | `SAP_MOCK_FALLBACK_PRODUCTION_DRIFT` | Major | [main.py](main.py#L2218-L2230) | In production environments without SAP CPI credentials, raises `HTTP 503 Service Unavailable` rather than generating phantom simulated `BELNR` numbers. |
+| **11** | `INGESTION_MEM_HANDLING` | Major | [main.py](main.py#L2078) | Configured Pillow `Image.MAX_IMAGE_PIXELS = 25_000_000` to prevent image decompression bomb Denial of Service. |
+| **12** | `ALERT_UNAUTHENTICATED_EMAIL_RELAY` | Major | [functions/index.js](functions/index.js#L23-L35) | Whitelisted Brevo Cloud Function recipient domains (`@aurogroup.com`, `@ent.aurogroup.com`, `@tridentchemphar.com`), preventing open email relay abuse. |
+| **13** | `XSS_UNESCAPED_INNERHTML_INVOICE_FEED` | Major | [index.html](index.html#L3241-L4115) | Applied context-aware `escapeHtml()` sanitization across all portal cards, tables, and audit logs against Stored and DOM XSS. |
+| **14** | `AUTH_UNAUTHENTICATED_AUDIT_LOGGING` | Major | [main.py](main.py#L3766-L3773) | Enforced mandatory `verify_corporate_user` authentication on `/api/auth/record-login` to prevent forged audit trail events. |
+| **15** | `AUTH_RATE_LIMIT_PARTITIONED_AND_DOS` | Major | [main.py](main.py#L274-L310) | Partitioned rate limiting and failed login lockouts per `{identifier}@{client_ip}`, preventing unauthenticated cross-tenant account lockouts. |
+| **16** | `CSP_UNSAFE_INLINE_SCRIPT_SRC` | Nit | [main.py](main.py#L132) | Hardened Content-Security-Policy middleware by removing `'unsafe-inline'` from `default-src`. |
+| **17** | `AI_TCS_RECONCILIATION_TAUTOLOGY_FLAW` | Nit | [main.py](main.py#L2830-L2835) | Replaced tautological condition (`0.0 < 2.0`) with exact mathematical balance equation: `abs(candidate_amt - (total_gross - taxable_base)) < 2.0`. |
+| **18** | `ALERT_HTML_INJECTION_EMAIL` | Nit | [main.py](main.py#L530-L555) | Applied `html.escape` to all user-controllable alert email template variables (`incident_id`, `filename`, `trace_id`, `error_detail`). |
+| **19** | `HITL_SYNTHETIC_ATTACHMENT_INJECTION` | Nit | [main.py](main.py#L4154-L4159) | Removed dummy synthetic PDF generation fallback (`%AEPL HITL Synthesized Document`); raises HTTP 422 if genuine attachment is missing. |
+| **20** | `INGESTION_BATCH_RATE_LIMIT_BYPASS` | Nit | [main.py](main.py#L3884-L3887) | Capped batch upload endpoint at maximum 10 documents per request to prevent rate limit circumvention. |
+| **21** | `INGESTION_MAGIC_BYTE_BYPASS` | Nit | [main.py](main.py#L152-L154) | Mandated both `.pdf` file extension and `%PDF-` magic header bytes via boolean `and` validation. |
+| **22** | `SAP_REJECTION_FINALITY_BYPASS` | Nit | [main.py](main.py#L1287) | Included `SAP_REJECTED` in duplicate invoice status check, preventing re-upload and re-submission of rejected invoices. |
+| **23** | `SAP_VALIDATION_SCHEMA_RULE` | Nit | [main.py](main.py#L1770-L1778) | Added mandatory validation for vendor invoice reference number (`RefDocNo`) in `validate_sap_schema`. |
+| **24** | `SAP_XML_PARSER_XXE_RISK` | Nit | [main.py](main.py#L19-L23), [requirements.txt](requirements.txt#L13) | Adopted `defusedxml.ElementTree` for parsing SAP CPI XML responses, mitigating XML entity expansion / XXE attacks. |
+| **25** | `RBAC_MIS_DASHBOARD_AND_TENANT_ISOLATION` | Blocker | [index.html](index.html#L1170, #L1765), [main.py](main.py#L4370-L4490) | *(Bonus Governance)* Enforced strict RBAC: Admin MIS dashboard and telemetry endpoints return HTTP 403 Forbidden to non-admin users. |
 
 ### Edge Browser Multi-Day Auto-Login Elimination
 Microsoft Edge users previously remained logged into the portal across days or weeks due to browser session restoration and unvalidated local state. This has been resolved through:
 1. **Strict Activity Expiration (`isSessionIdleExpired`)**: Missing or uninitialized `last_activity_at` timestamps now immediately evaluate to expired (`true`), forcing re-authentication.
 2. **Zero-Trust Backend Session Verification**: Purged `allowOfflineRestore` logic; sessions require active verification against `/api/auth/me`. Expired or invalid sessions immediately trigger full credential teardown.
 3. **In-Memory Firebase Persistence**: Initialized Firebase Auth with `inMemoryPersistence` (`Auth.Persistence.NONE`), preventing credentials from persisting in IndexedDB across browser restarts.
-
----
 
 ---
 
