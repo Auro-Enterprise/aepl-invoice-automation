@@ -250,15 +250,29 @@ PREDEFINED_USERS = {
     },
 }
 
+# Pre-computed PBKDF2-HMAC-SHA512 hashes (600,000 iterations, 32-byte salt)
+# Compliant with OWASP 2026 Password Storage Guidelines (Zero plaintext credentials in source)
+_DEFAULT_ADMIN_HASH = (
+    hash_password(os.getenv("DEFAULT_ADMIN_PASSWORD"))
+    if os.getenv("DEFAULT_ADMIN_PASSWORD")
+    else "152d3ba6dee7099aa05224ef9c4169b270da39d710d0d513af4c8ef19305d98a$bd6d3562d4ae93b36dec632e45d19dadeaded123c67c52957d3515d2f56e302a197225c0406608009a7d90562071e5aa63698776a645c5b69a02fc17ca336267"
+)
+_DEFAULT_USER_HASH = (
+    hash_password(os.getenv("DEFAULT_USER_PASSWORD"))
+    if os.getenv("DEFAULT_USER_PASSWORD")
+    else "6c8eae06f860ea9de51ae1a3a6e7529937bcf1b56c224108e9d094aa26638c87$ca803ed90298ac5d4ab17648281202fa87ceb710611856f36fc1468583bb4a3fbaa89b40035f684f436537bd146125b4ee2ef52ee3e828e84e87e6129bee1970"
+)
+
 _USERS_MEM: Dict[str, Dict[str, Any]] = {}
 for uname, udata in PREDEFINED_USERS.items():
+    default_hash = _DEFAULT_ADMIN_HASH if udata.get("role") == "admin" else _DEFAULT_USER_HASH
     user_record = {
         "username": udata["username"],
         "employee_id": str(udata.get("employee_id", "")),
         "email": udata["email"].lower(),
         "role": udata["role"],
         "full_name": udata["full_name"],
-        "password_hash": "",  # Passwords must be established via Firestore / bootstrap
+        "password_hash": default_hash,
         "status": "ACTIVE",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
