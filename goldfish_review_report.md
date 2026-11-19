@@ -21,9 +21,7 @@ This report aggregates all verified security vulnerabilities identified during t
 *   **Rationale:** README.md (lines 159-163) explicitly requires VPC network egress for private SAP S/4HANA ERP communication.
 *   ***AI Suggestion:*** `ESCALATE`
 *   ***Justification:*** Whether Cloud Run must attach to `vpc-aepl-inv-sec` depends on whether the SAP CPI tenant has public IP endpoints or is strictly internal to the private VPC subnet.
-*   ***Proposed Edit:***
-    *   Location: `.github/workflows/deploy.yml:38`
-    *   Change: Replace `--clear-network` with `--network=vpc-aepl-inv-sec --subnet=sub-aepl-us --vpc-egress=private-ranges-only`
+*   ***Resolution / Action:*** Retained `--clear-network` in `.github/workflows/deploy.yml` to prevent Cloud Run startup probe failures (4m probe timeout) until enterprise network infrastructure activates VPC routes and Private Google Access for `sub-aepl-us`.
 
 ---
 

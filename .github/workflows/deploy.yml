@@ -35,9 +35,7 @@ jobs:
             --service-account="sa-invoice-brain@prj-aepl-ai-inv-auto-dev.iam.gserviceaccount.com" \
             --build-service-account="projects/prj-aepl-ai-inv-auto-dev/serviceAccounts/sa-cicd-builder@prj-aepl-ai-inv-auto-dev.iam.gserviceaccount.com" \
             --ingress=all \
-            --network=vpc-aepl-inv-sec \
-            --subnet=sub-aepl-us \
-            --vpc-egress=private-ranges-only \
+            --clear-network \
             --no-invoker-iam-check \
             --timeout=300 \
             --cpu-throttling \

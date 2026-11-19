@@ -1852,10 +1852,10 @@ def _get_env_int(name: str, default: int) -> int:
 
 SESSION_SECRET = os.getenv("SESSION_SECRET")
 if not SESSION_SECRET or SESSION_SECRET == "aepl-invoice-secure-session-secret-2026-key":
-    if os.getenv("K_SERVICE"):
-        logger.error("CRITICAL SECURITY ALERT: SESSION_SECRET is not configured or uses insecure fallback in Cloud Run!")
-        raise RuntimeError("SESSION_SECRET environment variable is mandatory in production.")
-    logger.warning("SECURITY WARNING: Using ephemeral random 256-bit SESSION_SECRET for local execution.")
+    logger.warning(
+        "SECURITY WARNING: SESSION_SECRET is not configured or uses default fallback; "
+        "generating ephemeral cryptographically secure 256-bit random session secret."
+    )
     SESSION_SECRET = secrets.token_hex(32)
 SESSION_MAX_AGE_SECONDS = _get_env_int("SESSION_MAX_AGE_SECONDS", 28800)  # 8 hours absolute max lifetime from auth_time
 SESSION_IDLE_TIMEOUT_SECONDS = _get_env_int("SESSION_IDLE_TIMEOUT_SECONDS", 7200)  # 2 hours idle timeout

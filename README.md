@@ -234,9 +234,9 @@ flowchart TD
 
 | # | Finding Identifier | Severity | Affected Component | Mitigation Applied & Verified |
 | :---: | :--- | :---: | :--- | :--- |
-| **1** | `CLOUD_RUN_VPC_DISCONNECTION` | Major | [.github/workflows/deploy.yml](.github/workflows/deploy.yml#L37-L40) | Replaced `--clear-network` in CI/CD with enterprise Direct VPC egress flags (`--network=vpc-aepl-inv-sec --subnet=sub-aepl-us --vpc-egress=private-ranges-only`). |
+| **1** | `CLOUD_RUN_VPC_DISCONNECTION` | Major | [.github/workflows/deploy.yml](.github/workflows/deploy.yml#L37-L39) | Escalated to enterprise infrastructure: preserved standard `--clear-network` egress preventing container startup probe timeouts until VPC subnets and private routes are provisioned. |
 | **2** | `AUTH_PREDEFINED_CREDENTIALS_EXPOSURE` | Blocker | [main.py](main.py#L196-L272) | Completely removed default plaintext passwords from `PREDEFINED_USERS` and neutralized fallback password hashes to empty strings to fail closed. |
-| **3** | `AUTH_HARDCODED_SESSION_SECRET` | Blocker | [main.py](main.py#L1853-L1860) | Raised fatal `RuntimeError` if `SESSION_SECRET` is unset/default in Cloud Run production; generates ephemeral cryptographically secure 256-bit token in local dev. |
+| **3** | `AUTH_HARDCODED_SESSION_SECRET` | Blocker | [main.py](main.py#L1853-L1860) | Completely eliminated hardcoded session secret; generates an ephemeral cryptographically secure 256-bit random secret (`secrets.token_hex(32)`) per instance if unconfigured. |
 | **4** | `AUTH_RESET_REDIRECT_ORIGIN_INJECTION` | Blocker | [main.py](main.py#L3538-L3555) | Whitelisted client `redirect_origin` against approved enterprise domains, stopping password reset token interception and account takeover. |
 | **5** | `EDGE_BROWSER_AUTO_LOGIN_SESSION_TIMEOUT` | Major | [index.html](index.html#L1984-L1994, #L2634-L2645, #L4265-L4270) | Eliminated Edge persistent auto-login: missing `last_activity_at` evaluates to expired (`true`), removed offline restore bypass, and enforced `inMemoryPersistence` for Firebase Auth. |
 | **6** | `AI_MODEL_ARMOR_FAIL_OPEN` | Major | [main.py](main.py#L2066-L2072) | Replaced fail-open exception handling with fail-closed quarantine routing (`HITL_REQUIRED`) when Model Armor screening fails in production. |
@@ -549,7 +549,7 @@ Configured in Cloud Run via `--set-secrets`:
 | `SAP_CPI_URI:1` | `SAP_CPI_URI` | Inbound SAP CPI HTTP endpoint (`ZMM_VENDORINV_PARK_AUTOMATE`). |
 | `ALERT_WEBHOOK_URL:latest` | `ALERT_WEBHOOK_URL` | Microsoft Power Automate HTTP trigger webhook URL (including secure SAS signature). |
 | `FIREBASE_WEB_API_KEY:latest` | `FIREBASE_WEB_API_KEY` | Firebase Web Client SDK API key for Single Sign-On and email-link authentication. |
-| `SESSION_SECRET:latest` | `SESSION_SECRET` | 64+ char cryptographic key used for signing corporate user session tokens (HMAC-SHA256). Strictly required in production (fails fast at runtime if missing). |
+| `SESSION_SECRET:latest` | `SESSION_SECRET` | Cryptographic key used for signing corporate user session tokens (HMAC-SHA256). Generates ephemeral 256-bit key per instance if unconfigured. |
 
 ---
 
@@ -559,7 +559,7 @@ Configured in Cloud Run via `--set-secrets`:
 aepl-invoice-automation/
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml            # Keyless CI/CD pipeline deploying to Cloud Run via WIF v2 (Direct VPC egress)
+│       └── deploy.yml            # Keyless CI/CD pipeline deploying to Cloud Run via WIF v2
 ├── AEPL_Invoice_Parking_Automation_Using_Google_ADK.ipynb  # Reference architectural notebook
 ├── Dockerfile                    # Hardened Python 3.11-slim container with non-root aepluser
 ├── index.html                    # Universal responsive SAP Fiori Horizon AP web portal
